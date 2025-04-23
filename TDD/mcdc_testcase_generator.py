@@ -82,35 +82,53 @@ def parse_functions(src_dir, inc_dir):
                         funcs.append(c)
     return funcs
 
-def gather_atoms_and_fields(cond_cursor, struct_fields):
+def gather_atoms_and_fields(cond_cursor, fields_map):
+    """
+    Extract atomic conditions from the AST, mapping to struct parameters.
+    fields_map: dict of {param_name: set(of field names)}
+    Returns list of (base.field, field) tuples.
+    """
     atoms = []
+    def find_base(n):
+        cur = n
+        while cur is not None:
+            if cur.kind == CursorKind.DECL_REF_EXPR:
+                return cur.spelling
+            cur = getattr(cur, 'semantic_parent', None)
+        return None
+
     def visit(node):
-        # Extract struct field references directly
         if node.kind == CursorKind.MEMBER_REF_EXPR:
-            field = node.spelling
-            if field in struct_fields:
-                atoms.append((field, f"{field}"))
-                logging.debug(f"Matched struct field atom: {field}")
+            field_name = node.spelling
+            base = find_base(node)
+            if base and base in fields_map and field_name in fields_map[base]:
+                key = f"{base}.{field_name}"
+                atoms.append((key, field_name))
+                logging.debug(f"Matched atom: {key}")
         for ch in node.get_children():
             visit(ch)
     visit(cond_cursor)
     return atoms
 
-def gather_conditions(fn, struct_fields):
+def gather_conditions(fn_cursor, fields_map):
+    """
+    Traverse the function AST to collect all condition atoms based on fields_map.
+    """
     atoms = []
     def recurse(node):
         if node.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT, CursorKind.CONDITIONAL_OPERATOR):
-            cond = next(node.get_children(), None)
-            if cond:
-                atoms.extend(gather_atoms_and_fields(cond, struct_fields))
+            # Visit entire expression subtree under condition
+            for ch in node.get_children():
+                atoms.extend(gather_atoms_and_fields(ch, fields_map))
         for ch in node.get_children():
             recurse(ch)
-    recurse(fn)
+    recurse(fn_cursor)
+    # Deduplicate
     uniq = []
     for a in atoms:
         if a not in uniq:
             uniq.append(a)
-    logging.debug(f"Atoms for {fn.spelling}: {uniq}")
+    logging.debug(f"Atoms for {fn_cursor.spelling}: {uniq}")
     return uniq
 
 def solve_mcdc(_, atoms):
