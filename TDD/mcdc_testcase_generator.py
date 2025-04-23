@@ -10,7 +10,8 @@ import logging
 import z3
 from clang.cindex import Config, Index, CursorKind, LibclangError
 
-# Debug log filename\ nlog_file = "mcdc_debug_log.txt"
+# Debug log filename
+log_file = "mcdc_debug_log.txt"
 logging.basicConfig(
     filename=log_file,
     filemode='w',
@@ -20,7 +21,6 @@ logging.basicConfig(
 print(f"[INFO] Debug log written to '{log_file}'")
 
 def load_libclang():
-    """Load libclang from environment or fallback paths."""
     path = os.getenv("LIBCLANG_PATH")
     logging.debug(f"LIBCLANG_PATH={path}")
     if path and os.path.exists(path):
@@ -50,7 +50,6 @@ def normalize_path(path):
     return abspath
 
 def parse_headers(include_dir):
-    """Parse headers to collect all struct types and their fields."""
     logging.debug(f"Parsing headers in {include_dir}")
     index = Index.create()
     types = {}
@@ -68,7 +67,6 @@ def parse_headers(include_dir):
     return types
 
 def parse_functions(src_dir, include_dir):
-    """Parse C source files to collect function definitions."""
     logging.debug(f"Parsing sources in {src_dir}")
     index = Index.create()
     funcs = []
@@ -85,30 +83,22 @@ def parse_functions(src_dir, include_dir):
     return funcs
 
 def gather_atoms_and_fields(node, fields_map):
-    """
-    Recursively extract struct-member conditions and local var conditions.
-    Returns list of ("base.field", field) atoms.
-    """
     atoms = []
-    # Track local var definitions mapping to struct expressions
     local_map = {}
-    # Phase 1: scan DECL_STMT for local var initializers
+    # Scan local variable initializers
     def scan_locals(n):
         if n.kind == CursorKind.DECL_STMT:
             for var in n.get_children():
                 if var.kind == CursorKind.VAR_DECL:
                     name = var.spelling
-                    # initializer expression
+                    sub_atoms = []
                     for init in var.get_children():
-                        # find struct member references inside init
-                        sub_atoms = []
-                        extract_atoms(init, fields_map, sub_atoms)
-                        if sub_atoms:
-                            local_map[name] = sub_atoms
+                        collect_atoms(init, fields_map, sub_atoms)
+                    if sub_atoms:
+                        local_map[name] = sub_atoms
         for c in n.get_children():
             scan_locals(c)
-    # Helper to extract MEMBER_REF_EXPR and DECL_REF_EXPR
-    def extract_atoms(n, fmap, store):
+    def collect_atoms(n, fmap, store):
         if n.kind == CursorKind.MEMBER_REF_EXPR:
             field = n.spelling
             base = None
@@ -117,43 +107,34 @@ def gather_atoms_and_fields(node, fields_map):
                     base = ch.spelling
                     break
             if base in fmap and field in fmap[base]:
-                store.append((base + '.' + field, field))
+                store.append((f"{base}.{field}", field))
         elif n.kind == CursorKind.DECL_REF_EXPR:
             name = n.spelling
             for base, fields in fmap.items():
                 if name in fields:
-                    store.append((base + '.' + name, name))
+                    store.append((f"{base}.{name}", name))
         for c in n.get_children():
-            extract_atoms(c, fmap, store)
-    # Scan locals
-    extract_atoms_locals = scan_locals
+            collect_atoms(c, fmap, store)
     scan_locals(node)
-    # Phase 2: visit node to extract direct atoms and propagate locals
+    # Visit all nodes and propagate
     def visit(n):
-        # Direct struct member
         if n.kind in (CursorKind.MEMBER_REF_EXPR, CursorKind.DECL_REF_EXPR):
-            # extract direct
-            extract_atoms(n, fields_map, atoms)
-            # check local var usage
+            collect_atoms(n, fields_map, atoms)
             if n.kind == CursorKind.DECL_REF_EXPR:
-                name = n.spelling
-                if name in local_map:
-                    # propagate local dependencies
-                    atoms.extend(local_map[name])
+                nm = n.spelling
+                if nm in local_map:
+                    atoms.extend(local_map[nm])
         for c in n.get_children():
             visit(c)
     visit(node)
-    # dedupe
-    unique = []
+    # Deduplicate
+    uniq = []
     for a in atoms:
-        if a not in unique:
-            unique.append(a)
-    return unique
+        if a not in uniq:
+            uniq.append(a)
+    return uniq
 
 def gather_conditions(fn_cursor, fields_map):
-    """
-    Traverse function AST to collect condition expressions and local inits.
-    """
     atoms = []
     def recurse(n):
         if n.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT):
@@ -167,7 +148,6 @@ def gather_conditions(fn_cursor, fields_map):
         for c in n.get_children():
             recurse(c)
     recurse(fn_cursor)
-    # dedupe
     uniq = []
     for a in atoms:
         if a not in uniq:
@@ -176,9 +156,6 @@ def gather_conditions(fn_cursor, fields_map):
     return uniq
 
 def solve_mcdc(atoms):
-    """
-    Generate MC/DC vectors by toggling each atom.
-    """
     tests = []
     z3vars = {key: z3.Int(key.replace('.', '_')) for key, _ in atoms}
     for key, _ in atoms:
@@ -232,9 +209,8 @@ def main():
     funcs = parse_functions(src, inc)
     logging.debug(f"Parsed {len(funcs)} functions.")
     for fn in funcs:
-        params = list(fn.get_arguments())
         fields_map = {}
-        for p in params:
+        for p in fn.get_arguments():
             nm = p.spelling
             tp = p.type.spelling.replace('*','').strip()
             if tp in types:
