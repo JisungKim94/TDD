@@ -96,23 +96,23 @@ def gather_atoms_and_fields(node, fields_map):
     Returns list of tuples ("base.field", "field").
     """
     atoms = []
-    def find_base(n):
-        cur = n
-        while cur is not None:
-            if cur.kind == CursorKind.DECL_REF_EXPR:
-                return cur.spelling
-            cur = getattr(cur, 'semantic_parent', None)
-        return None
-
+    
     def visit(n):
         logging.debug(f"Visiting node: kind={n.kind}, spelling={n.spelling}")
+        # Detect struct member accesses: u8_Orders->u8_oSFA1 or globalRoles->rSFA1
         if n.kind == CursorKind.MEMBER_REF_EXPR:
-            field = n.spelling
-            base = find_base(n)
-            if base in fields_map and field in fields_map[base]:
+            field = n.spelling  # member name
+            # find base by checking first child
+            base = None
+            for ch in n.get_children():
+                if ch.kind == CursorKind.DECL_REF_EXPR:
+                    base = ch.spelling
+                    break
+            if base and base in fields_map and field in fields_map[base]:
                 key = f"{base}.{field}"
                 atoms.append((key, field))
                 logging.debug(f"Matched atom: {key}")
+        # recurse children
         for c in n.get_children():
             visit(c)
     visit(node)
