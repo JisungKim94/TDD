@@ -62,6 +62,9 @@ def parse_headers(include_path):
                     if c.kind in (CursorKind.STRUCT_DECL, CursorKind.ENUM_DECL, CursorKind.TYPEDEF_DECL):
                         if c.spelling:
                             logging.debug(f"Found type: {c.spelling}")
+                            field_names = [f.spelling for f in c.get_children() if f.kind.name == 'FIELD_DECL']
+                            for name in field_names:
+                                logging.debug(f"[STRUCT {c.spelling}] Field: {name}")
                             types[c.spelling] = c
     return types
 
@@ -157,17 +160,26 @@ def solve_mcdc(_, atoms):
 def write_test_file(fn, struct_name, cases, out_dir):
     path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
     with open(path, 'w') as f:
-        f.write('#include "gtest/gtest.h"\n')
-        f.write('#include "mycode.h"\n')
+        f.write('#include "gtest/gtest.h"
+')
+        f.write('#include "mycode.h"
+')
         for i, (label, vals) in enumerate(cases, 1):
-            f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{\n')
-            f.write(f'  {struct_name} globalRoles = {{0}};\n')
+            f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{
+')
+            f.write(f'  {struct_name} globalRoles = {{0}};
+')
             for k, v in vals.items():
-                f.write(f'  globalRoles.{k} = {v};\n')
-            f.write('  // MC/DC unrelated but required input\n')
-            f.write('  tECUOrders u8_Orders = {0};\n')
-            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&globalRoles)); // {label}\n')
-            f.write('}\n')
+                f.write(f'  globalRoles.{k} = {v};
+')
+            f.write('  // MC/DC unrelated but required input
+')
+            f.write('  tECUOrders u8_Orders = {0};
+')
+            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&globalRoles)); // {label}
+')
+            f.write('}
+')
     logging.info(f"Generated: {path}")
 
 def main():
