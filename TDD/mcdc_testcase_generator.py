@@ -199,7 +199,7 @@ def main():
         atoms = gather_conditions(fn, fields)
         cases = solve_mcdc(fields, atoms)
         # Filter to valid struct members
-        base0 = fn.get_arguments()[0].spelling
+        base0 = list(fn.get_arguments())[0].spelling
         case_filtered = []
         for atom, vec in cases:
             b, fld = atom.split('.',1)
