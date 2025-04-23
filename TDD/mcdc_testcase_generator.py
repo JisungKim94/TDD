@@ -160,20 +160,44 @@ def solve_mcdc(_, atoms):
                 logging.warning(f"UNSAT for {field}={val} with others fixed to 1")
     return tests
 
-def write_test_file(fn, struct_name, cases, out_dir):
+def write_test_file(fn, cases, out_dir):
+    # Derive parameter names and types dynamically from function signature
+    args = list(fn.get_arguments())
+    if not args:
+        logging.error(f"No parameters for function {fn.spelling}, cannot generate test file.")
+        return
+    # First argument (e.g., GlobalRoles *globalRoles)
+    arg0 = args[0].spelling or 'input0'
+    type0 = args[0].type.spelling.replace('*', '').strip()
+    # Second argument if exists (e.g., tECUOrders *u8_Orders)
+    if len(args) > 1:
+        arg1 = args[1].spelling or 'input1'
+        type1 = args[1].type.spelling.replace('*', '').strip()
+    else:
+        arg1 = None
+        type1 = None
+
     path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
     with open(path, 'w') as f:
+        # Standard includes
         f.write('#include "gtest/gtest.h"\n')
         f.write('#include "mycode.h"\n')
+        # Generate a test case per MC/DC vector
         for i, (label, vals) in enumerate(cases, 1):
-            input_var_name = "st_" + fn.spelling if struct_name.lower().startswith("fail") else "globalRoles"
             f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{\n')
-            f.write(f'  {struct_name} {input_var_name} = {{0}};\n')
+            # Initialize parameters to zero
+            f.write(f'  {type0} {arg0} = {{0}};\n')
+            if arg1 and type1:
+                f.write(f'  {type1} {arg1} = {{0}};\n')
+            # Assign MC/DC test values
             for k, v in vals.items():
-                f.write(f'  {input_var_name}.{k.split(".")[-1]} = {v};\n')
-            f.write('  // MC/DC unrelated but required input\n')
-            f.write('  tECUOrders u8_Orders = {0};\n')
-            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&{input_var_name}, &u8_Orders)); // {label}\n')
+                base, field = k.split('.', 1)
+                f.write(f'  {base}.{field} = {v};\n')
+            # Call function under test
+            if arg1 and type1:
+                f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&{arg0}, &{arg1})); // {label}\n')
+            else:
+                f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&{arg0})); // {label}\n')
             f.write('}\n')
     logging.info(f"Generated: {path}")
 
