@@ -26,8 +26,8 @@ def load_libclang():
             sys.stderr.write(f"Error loading libclang from {libclang_path}: {e}\n")
     if not loaded:
         possible = [
-            r"C:\Program Files\LLVM\bin\libclang.dll",
-            r"C:\Program Files (x86)\LLVM\bin\libclang.dll",
+            r"C:\\Program Files\\LLVM\\bin\\libclang.dll",
+            r"C:\\Program Files (x86)\\LLVM\\bin\\libclang.dll",
         ]
         for p in possible:
             print(f"[DEBUG] Checking {p}")
@@ -47,7 +47,6 @@ def load_libclang():
         sys.exit(1)
 
 # Normalize path to absolute
-
 def normalize_path(path):
     abs_path = os.path.abspath(path)
     print(f"[DEBUG] Normalized path: {path} -> {abs_path}")
@@ -119,7 +118,7 @@ def solve_mcdc(struct_cursor, atoms):
 
 
 def write_test_file(fn, struct_name, cases, out_dir):
-    path = os.path.join(out_dir, f"{fn.spelling}_mcdc_test.cpp")
+    path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
     with open(path,'w') as f:
         f.write('#include "gtest/gtest.h"\n')
         f.write(f'#include "{fn.spelling}.h"\n\n')
