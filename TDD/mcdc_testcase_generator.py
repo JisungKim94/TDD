@@ -76,7 +76,7 @@ def write_skeleton(fn, fields_map, out_dir):
         f.write('#include "gtest/gtest.h"\n')
         f.write('#include "mycode.h"\n\n')
         f.write(f'// Skeleton MC/DC GoogleTest for {fn.spelling}\n')
-        f.write(f'TEST(MCDC_{fn.spelling}, Skeleton) {{\n')
+        f.write(f'TEST(MC_DC_{fn.spelling}, Skeleton) {{\n')
         # Declare inputs
         for p in fn.get_arguments():
             tp = p.type.spelling.replace('*','').strip()
