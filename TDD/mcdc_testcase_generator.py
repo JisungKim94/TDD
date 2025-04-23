@@ -64,7 +64,18 @@ def main():
         sys.exit(1)
 
     code = read_file(c_path)
-    m = re.search(r'\bint\s+(\w+)\s*\([^)]*\)\s*\{[^}]*if\s*\(([^)]+)\)', code, re.DOTALL)
+
+    # 디버깅: if 가 포함된 모든 라인 출력
+    for i, line in enumerate(code.splitlines(), 1):
+        if 'if' in line:
+            print(f"[DEBUG] Line {i}: {line.strip()}")
+
+    # 함수 안 첫 번째 if 문 매치용 정규식 (더 유연하게)
+    pattern = (
+        r'\bint\s+(\w+)\s*\([^)]*\)[^{]*\{'
+        r'(?:[^{}]*\{[^{}]*\})*?[^{}]*?\bif\s*\(([^)]+)\)'
+    )
+    m = re.search(pattern, code, re.DOTALL)
     if not m:
         print("Error: No if-statement found for MC/DC generation.")
         sys.exit(1)
@@ -85,3 +96,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
