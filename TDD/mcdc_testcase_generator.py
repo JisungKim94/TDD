@@ -129,17 +129,24 @@ def gather_atoms_and_fields(cond_cursor, fields_map):
 def gather_conditions(fn_cursor, fields_map):
     """
     Traverse the function AST to collect all condition atoms based on fields_map.
+    This now includes scanning DECL_STMT assignments and their embedded ternary conditions.
     """
     atoms = []
     def recurse(node):
-        if node.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT, CursorKind.CONDITIONAL_OPERATOR):
-            # Visit entire expression subtree under condition
-            for ch in node.get_children():
-                atoms.extend(gather_atoms_and_fields(ch, fields_map))
+        # Analyze any expression node (e.g. assignments, if conditions, etc.)
+        if node.kind in (
+            CursorKind.IF_STMT,
+            CursorKind.WHILE_STMT,
+            CursorKind.RETURN_STMT,
+            CursorKind.BINARY_OPERATOR,
+            CursorKind.CONDITIONAL_OPERATOR,
+            CursorKind.DECL_STMT,
+            CursorKind.CALL_EXPR
+        ):
+            atoms.extend(gather_atoms_and_fields(node, fields_map))
         for ch in node.get_children():
             recurse(ch)
     recurse(fn_cursor)
-    # Deduplicate
     uniq = []
     for a in atoms:
         if a not in uniq:
@@ -167,7 +174,7 @@ def solve_mcdc(_, atoms):
     return tests
 
 def write_test_file(fn, cases, out_dir):
-    args = list(list(fn.get_arguments()))
+    args = list(fn.get_arguments())
     # Parameter names and types from signature
     name0 = args[0].spelling
     type0 = args[0].type.spelling.replace('*','').strip()
@@ -186,9 +193,7 @@ def write_test_file(fn, cases, out_dir):
             if name1:
                 f.write(f'  {type1} {name1} = {{0}};\n')
             # Assign only valid struct members
-            for atom, _ in cases:
-                pass  # skip placeholder
-            for field, value in vec.items():
+                        for field, value in vec.items():
                 if field in vec:
                     if name1 and field in cases[
                         0][1]:
@@ -218,22 +223,36 @@ def main():
     logging.debug(f"Parsed {len(funcs)} functions.")
 
     for fn in funcs:
-        # Determine struct fields from first parameter
-        arg0 = list(list(fn.get_arguments()))[0]
-        type0 = arg0.type.spelling.replace('*','').strip()
-        cursor = types.get(type0)
-        if not cursor:
-            logging.warning(f"Struct {type0} not found for {fn.spelling}, skipping.")
+        # Gather parameter names and struct fields map
+        args = list(fn.get_arguments())
+        if not args:
+            logging.warning(f"Function {fn.spelling} has no arguments, skipping.")
             continue
-        fields = {f.spelling for f in cursor.get_children() if f.kind.name == 'FIELD_DECL'}
-        atoms = gather_conditions(fn, fields)
-        cases = solve_mcdc(fields, atoms)
-        # Filter to valid struct members
-        base0 = list(list(fn.get_arguments()))[0].spelling
+        fields_map = {}
+        # First parameter
+        name0 = args[0].spelling
+        type0 = args[0].type.spelling.replace('*','').strip()
+        cursor0 = types.get(type0)
+        if cursor0:
+            fields_map[name0] = {f.spelling for f in cursor0.get_children() if f.kind.name=='FIELD_DECL'}
+        # Second parameter if exists
+        if len(args) > 1:
+            name1 = args[1].spelling
+            type1 = args[1].type.spelling.replace('*','').strip()
+            cursor1 = types.get(type1)
+            if cursor1:
+                fields_map[name1] = {f.spelling for f in cursor1.get_children() if f.kind.name=='FIELD_DECL'}
+        if not fields_map:
+            logging.warning(f"No struct parameters found for {fn.spelling}, skipping.")
+            continue
+        # Extract condition atoms based on struct parameters
+        atoms = gather_conditions(fn, fields_map)
+        cases = solve_mcdc(fields_map, atoms)
+        # Filter to valid struct members in atoms
         case_filtered = []
         for atom, vec in cases:
-            b, fld = atom.split('.',1)
-            if b == base0 and fld in fields:
+            base, fld = atom.split('.',1)
+            if base in fields_map and fld in fields_map[base]:
                 case_filtered.append((atom, vec))
         if case_filtered:
             write_test_file(fn, case_filtered, tst)
