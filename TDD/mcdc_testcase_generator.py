@@ -10,7 +10,8 @@ import z3
 import logging
 from clang.cindex import Config, Index, CursorKind, LibclangError
 
-# Debug log filename\ nlog_file = "mcdc_debug_log.txt"
+# Debug log filename
+log_file = "mcdc_debug_log.txt"
 logging.basicConfig(
     filename=log_file,
     filemode='w',
@@ -18,6 +19,7 @@ logging.basicConfig(
     format='[%(levelname)s] %(message)s'
 )
 print(f"[INFO] Debug log written to '{log_file}'")
+
 
 def load_libclang():
     """Load libclang from environment or fallback paths."""
@@ -44,10 +46,12 @@ def load_libclang():
     logging.fatal("libclang.dll not found or incompatible.")
     sys.exit(1)
 
+
 def normalize_path(p):
     abs_p = os.path.abspath(p)
     logging.debug(f"Normalized path: {p} -> {abs_p}")
     return abs_p
+
 
 def parse_headers(include_dir):
     """Parse headers to collect all struct types and their fields."""
@@ -62,10 +66,11 @@ def parse_headers(include_dir):
                 tu = index.parse(full_path, args=[f'-I{include_dir}'])
                 for c in tu.cursor.get_children():
                     if c.kind == CursorKind.STRUCT_DECL and c.spelling:
-                        fields = {fld.spelling for fld in c.get_children() if fld.kind.name == 'FIELD_DECL'}
+                        fields = {f.spelling for f in c.get_children() if f.kind.name == 'FIELD_DECL'}
                         logging.debug(f"Struct {c.spelling} fields: {fields}")
                         types[c.spelling] = fields
     return types
+
 
 def parse_functions(src_dir, include_dir):
     """Parse C source files to collect function definitions."""
@@ -84,6 +89,7 @@ def parse_functions(src_dir, include_dir):
                         funcs.append(c)
     return funcs
 
+
 def gather_atoms_and_fields(node, fields_map):
     """
     Recursively find MEMBER_REF_EXPR nodes under 'node' that correspond to struct fields in 'fields_map'.
@@ -92,13 +98,14 @@ def gather_atoms_and_fields(node, fields_map):
     atoms = []
     def find_base(n):
         cur = n
-        while cur:
+        while cur is not None:
             if cur.kind == CursorKind.DECL_REF_EXPR:
                 return cur.spelling
             cur = getattr(cur, 'semantic_parent', None)
         return None
 
     def visit(n):
+        logging.debug(f"Visiting node: kind={n.kind}, spelling={n.spelling}")
         if n.kind == CursorKind.MEMBER_REF_EXPR:
             field = n.spelling
             base = find_base(n)
@@ -111,32 +118,24 @@ def gather_atoms_and_fields(node, fields_map):
     visit(node)
     return atoms
 
+
 def gather_conditions(fn_cursor, fields_map):
     """
-    Traverse function AST to extract condition atoms for MC/DC.
-    Supports if, while, and conditional operators.
+    Traverse function AST to extract all condition atoms for MC/DC.
+    Scans IF_STMT, WHILE_STMT, and conditional expressions.
+    Also inspects DECL_STMT for ternary operators.
     """
     atoms = []
     def recurse(n):
-        if n.kind == CursorKind.IF_STMT:
-            # First child is the condition expression
+        if n.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT, CursorKind.CONDITIONAL_OPERATOR, CursorKind.DECL_STMT):
+            # Extract the expression child
             cond = next(n.get_children(), None)
-            if cond:
+            if cond is not None:
                 atoms.extend(gather_atoms_and_fields(cond, fields_map))
-        elif n.kind == CursorKind.WHILE_STMT:
-            cond = next(n.get_children(), None)
-            if cond:
-                atoms.extend(gather_atoms_and_fields(cond, fields_map))
-        elif n.kind == CursorKind.CONDITIONAL_OPERATOR:
-            # Ternary operator: condition is first child
-            cond = next(n.get_children(), None)
-            if cond:
-                atoms.extend(gather_atoms_and_fields(cond, fields_map))
-        # Recurse all children
         for c in n.get_children():
             recurse(c)
     recurse(fn_cursor)
-    # Deduplicate preserving order
+    # Deduplicate
     uniq = []
     for a in atoms:
         if a not in uniq:
@@ -144,10 +143,10 @@ def gather_conditions(fn_cursor, fields_map):
     logging.debug(f"Atoms for {fn_cursor.spelling}: {uniq}")
     return uniq
 
+
 def solve_mcdc(fields, atoms):
     """
-    Solve for MC/DC: toggle each field while others are true.
-    Returns list of (atom, {field: value}) test vectors.
+    Generate MC/DC test vectors by toggling each atom's field while others are true.
     """
     tests = []
     z3vars = {f: z3.Int(f) for f in fields}
@@ -165,25 +164,24 @@ def solve_mcdc(fields, atoms):
                 break
     return tests
 
+
 def write_test_file(fn, cases, fields_map, out_dir):
     """
-    Generate GoogleTest .cpp file with MC/DC cases.
+    Generate a GoogleTest .cpp file for the given function and MC/DC cases.
     """
     params = list(fn.get_arguments())
     names = [p.spelling for p in params]
-    types = [p.type.spelling.replace('*', '').strip() for p in params]
+    types_ = [p.type.spelling.replace('*', '').strip() for p in params]
     path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
     with open(path, 'w') as f:
         f.write('#include "gtest/gtest.h"\n')
         f.write('#include "mycode.h"\n\n')
         for i, (atom, vec) in enumerate(cases, 1):
             f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{\n')
-            # Initialize all struct parameters to zero
-            for nm, tp in zip(names, types):
+            # Initialize struct parameters
+            for nm, tp in zip(names, types_):
                 f.write(f'  {tp} {nm} = {{0}};\n')
-            # Assign only valid struct members
-            for base_field, _ in cases:
-                pass
+            # Assign MC/DC values to valid struct members
             for key, val in vec.items():
                 base, field = key.split('.', 1)
                 f.write(f'  {base}.{field} = {val};\n')
@@ -193,6 +191,7 @@ def write_test_file(fn, cases, fields_map, out_dir):
             f.write('}\n\n')
     logging.info(f"Generated: {path}")
 
+
 def main():
     if len(sys.argv) != 4:
         print("Usage: python generate_mcdc_tests.py <src_dir> <include_dir> <test_dir>")
@@ -201,17 +200,17 @@ def main():
     inc = normalize_path(sys.argv[2])
     tst = normalize_path(sys.argv[3])
     os.makedirs(tst, exist_ok=True)
-
+    
     load_libclang()
     types = parse_headers(inc)
     funcs = parse_functions(src, inc)
     logging.debug(f"Parsed {len(funcs)} functions.")
 
     for fn in funcs:
-        # Build fields_map for parameters
-        args = list(fn.get_arguments())
+        # Build map of parameter names to struct fields set
+        params = list(fn.get_arguments())
         fields_map = {}
-        for p in args:
+        for p in params:
             nm = p.spelling
             tp = p.type.spelling.replace('*', '').strip()
             if tp in types:
@@ -223,10 +222,12 @@ def main():
         if not atoms:
             logging.warning(f"No condition atoms for {fn.spelling}")
             continue
-        fields = set(f for fmap in fields_map.values() for f in fmap)
+        fields = set()
+        for fm in fields_map.values():
+            fields.update(fm)
         cases = solve_mcdc(fields, atoms)
-        # Filter valid atoms
-        filtered = [(a,v) for (a,v) in cases if a.split('.',1)[0] in fields_map]
+        # Filter cases by valid parameter base
+        filtered = [(a, v) for a, v in cases if a.split('.',1)[0] in fields_map]
         if filtered:
             write_test_file(fn, filtered, fields_map, tst)
         else:
