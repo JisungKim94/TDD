@@ -92,16 +92,16 @@ def parse_functions(src_dir, include_dir):
 
 def gather_atoms_and_fields(node, fields_map):
     """
-    Recursively find MEMBER_REF_EXPR nodes under 'node' that correspond to struct fields in 'fields_map'.
+    Recursively find MEMBER_REF_EXPR and DECL_REF_EXPR nodes under 'node' that correspond to struct fields in 'fields_map'.
     Returns list of tuples ("base.field", "field").
     """
     atoms = []
     
     def visit(n):
         logging.debug(f"Visiting node: kind={n.kind}, spelling={n.spelling}")
-        # Detect struct member accesses: u8_Orders->u8_oSFA1 or globalRoles->rSFA1
+        # Detect direct member reference expressions
         if n.kind == CursorKind.MEMBER_REF_EXPR:
-            field = n.spelling  # member name
+            field = n.spelling
             # find base by checking first child
             base = None
             for ch in n.get_children():
@@ -111,7 +111,16 @@ def gather_atoms_and_fields(node, fields_map):
             if base and base in fields_map and field in fields_map[base]:
                 key = f"{base}.{field}"
                 atoms.append((key, field))
-                logging.debug(f"Matched atom: {key}")
+                logging.debug(f"Matched MEMBER_REF_EXPR atom: {key}")
+        # Fallback: direct field reference in DECL_REF_EXPR
+        elif n.kind == CursorKind.DECL_REF_EXPR:
+            name = n.spelling
+            for base, fields in fields_map.items():
+                if name in fields:
+                    key = f"{base}.{name}"
+                    if (key, name) not in atoms:
+                        atoms.append((key, name))
+                        logging.debug(f"Matched DECL_REF_EXPR atom: {key}")
         # recurse children
         for c in n.get_children():
             visit(c)
