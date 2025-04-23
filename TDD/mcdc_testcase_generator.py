@@ -193,7 +193,7 @@ def write_test_file(fn, cases, out_dir):
             if name1:
                 f.write(f'  {type1} {name1} = {{0}};\n')
             # Assign only valid struct members
-                        for field, value in vec.items():
+            for field, value in vec.items():
                 if field in vec:
                     if name1 and field in cases[
                         0][1]:
