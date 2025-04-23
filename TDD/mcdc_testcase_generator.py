@@ -129,21 +129,22 @@ def gather_atoms_and_fields(cond_cursor, fields_map):
 def gather_conditions(fn_cursor, fields_map):
     """
     Traverse the function AST to collect all condition atoms based on fields_map.
-    This now includes scanning DECL_STMT assignments and their embedded ternary conditions.
+    Fix: extract condition expressions from IF, WHILE, DECL_STMT, etc.
     """
     atoms = []
     def recurse(node):
-        # Analyze any expression node (e.g. assignments, if conditions, etc.)
         if node.kind in (
             CursorKind.IF_STMT,
             CursorKind.WHILE_STMT,
+            CursorKind.DECL_STMT,
             CursorKind.RETURN_STMT,
+            CursorKind.CALL_EXPR,
             CursorKind.BINARY_OPERATOR,
             CursorKind.CONDITIONAL_OPERATOR,
-            CursorKind.DECL_STMT,
-            CursorKind.CALL_EXPR
         ):
-            atoms.extend(gather_atoms_and_fields(node, fields_map))
+            cond = next(node.get_children(), None)
+            if cond:
+                atoms.extend(gather_atoms_and_fields(cond, fields_map))
         for ch in node.get_children():
             recurse(ch)
     recurse(fn_cursor)
