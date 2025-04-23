@@ -138,39 +138,36 @@ def solve_mcdc(_, atoms):
 
 def write_test_file(fn, cases, out_dir):
     args = list(fn.get_arguments())
-    # Parameter names and types from signature
-    name0 = args[0].spelling
-    type0 = args[0].type.spelling.replace('*','').strip()
-    name1 = None; type1 = None
-    if len(args) > 1:
-        name1 = args[1].spelling
-        type1 = args[1].type.spelling.replace('*','').strip()
+    param_names = [arg.spelling or f"param{i}" for i, arg in enumerate(args)]
+    param_types = [arg.type.spelling.replace('*','').strip() for arg in args]
     path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
     with open(path, 'w') as f:
-        f.write('#include "gtest/gtest.h"\n')
-        f.write('#include "mycode.h"\n\n')
+        # Includes
+        f.write('#include "gtest/gtest.h"
+')
+        f.write('#include "mycode.h"
+
+')
+        # Generate test cases
         for i, (label, vec) in enumerate(cases, 1):
-            f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{\n')
-            # Init parameters
-            f.write(f'  {type0} {name0} = {{0}};\n')
-            if name1:
-                f.write(f'  {type1} {name1} = {{0}};\n')
-            # Assign only valid struct members
-            for atom, _ in cases:
-                pass  # skip placeholder
-            for field, value in vec.items():
-                if field in vec:
-                    if name1 and field in cases[
-                        0][1]:
-                        f.write(f'  {name1}.{field} = {value};\n')
-                    else:
-                        f.write(f'  {name0}.{field} = {value};\n')
-            # Call function under test
-            if name1:
-                f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&{name0}, &{name1})); // {label}\n')
-            else:
-                f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&{name0})); // {label}\n')
-            f.write('}\n\n')
+            f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{
+')
+            # Initialize all parameters to zero
+            for name, type_ in zip(param_names, param_types):
+                f.write(f'  {type_} {name} = {{0}};
+')
+            # Assign MC/DC test values
+            for atom, value in vec.items():
+                base, field = atom.split('.', 1)
+                f.write(f'  {base}.{field} = {value};
+')
+            # Call the function under test
+            call_args = ', '.join(f'&{name}' for name in param_names)
+            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}({call_args})); // {label}
+')
+            f.write('}
+
+')
     logging.info(f"Generated: {path}")
 
 def main():
