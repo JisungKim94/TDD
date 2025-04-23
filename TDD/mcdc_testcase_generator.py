@@ -10,7 +10,6 @@ import z3
 import logging
 from clang.cindex import Config, Index, CursorKind, LibclangError
 
-# Logging configuration
 log_file = "mcdc_debug_log.txt"
 logging.basicConfig(
     filename=log_file,
@@ -19,7 +18,6 @@ logging.basicConfig(
     format='[%(levelname)s] %(message)s'
 )
 print(f"[INFO] All debug output will be saved to '{log_file}'")
-
 
 def load_libclang():
     libclang_path = os.getenv("LIBCLANG_PATH")
@@ -31,7 +29,6 @@ def load_libclang():
             return
         except LibclangError as e:
             logging.error(f"Failed to load libclang: {e}")
-
     for p in [
         r"C:\\Program Files\\LLVM\\bin\\libclang.dll",
         r"C:\\Program Files (x86)\\LLVM\\bin\\libclang.dll",
@@ -43,16 +40,13 @@ def load_libclang():
                 return
             except LibclangError as e:
                 logging.error(f"Fallback libclang load failed from {p}: {e}")
-
     logging.fatal("libclang.dll not found or could not be loaded.")
     sys.exit(1)
-
 
 def normalize_path(path):
     abs_path = os.path.abspath(path)
     logging.debug(f"Normalized path: {path} -> {abs_path}")
     return abs_path
-
 
 def parse_headers(include_path):
     logging.debug(f"Parsing headers in: {include_path}")
@@ -71,7 +65,6 @@ def parse_headers(include_path):
                             types[c.spelling] = c
     return types
 
-
 def parse_functions(src_path, include_path):
     logging.debug(f"Parsing C source files in: {src_path}")
     index = Index.create()
@@ -88,3 +81,121 @@ def parse_functions(src_path, include_path):
                         funcs.append(c)
     return funcs
 
+def gather_atoms_and_fields(cond_cursor, struct_fields):
+    atoms = []
+    def visit(node):
+        logging.debug(f"Visiting node: kind={node.kind}, spelling='{node.spelling}', displayname='{node.displayname}'")
+        if node.kind == CursorKind.MEMBER_REF_EXPR:
+            field_name = node.spelling
+            if field_name in struct_fields:
+                atoms.append((field_name, f"{field_name} (from AST)"))
+                logging.debug(f"Matched atom via MEMBER_REF_EXPR: {field_name}")
+        elif node.kind == CursorKind.BINARY_OPERATOR:
+            children = list(node.get_children())
+            if len(children) == 2:
+                lhs, rhs = children
+                lhs_text = lhs.spelling or lhs.displayname
+                for field in struct_fields:
+                    if field in lhs_text:
+                        atoms.append((field, f"{lhs_text} op {rhs.spelling or rhs.displayname}"))
+                        logging.debug(f"Matched atom via BINARY_OPERATOR: {lhs_text}")
+                for side in [lhs, rhs]:
+                    if side.kind == CursorKind.DECL_REF_EXPR:
+                        var_name = side.spelling
+                        if var_name:
+                            atoms.append((var_name, f"{var_name} (from comparison)"))
+                            logging.debug(f"Matched atom via BINARY_OPERATOR comparison: {var_name}")
+        elif node.kind == CursorKind.DECL_REF_EXPR:
+            var_name = node.spelling
+            if var_name:
+                atoms.append((var_name, f"{var_name} (DECL_REF_EXPR)"))
+                logging.debug(f"Matched atom via DECL_REF_EXPR: {var_name}")
+        for child in node.get_children():
+            visit(child)
+    visit(cond_cursor)
+    return atoms
+
+def gather_conditions(fn_cursor, struct_fields):
+    atoms = []
+    def recurse(node):
+        if node.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT, CursorKind.CONDITIONAL_OPERATOR):
+            logging.debug(f"Found conditional statement: {node.kind} in function {fn_cursor.spelling}")
+            cond = next(node.get_children(), None)
+            if cond:
+                logging.debug(f"Condition expression: {cond.spelling} / {cond.displayname}")
+                atoms.extend(gather_atoms_and_fields(cond, struct_fields))
+            else:
+                logging.warning(f"Condition node has no children in {fn_cursor.spelling}")
+        for ch in node.get_children():
+            recurse(ch)
+    recurse(fn_cursor)
+    logging.debug(f"Total atoms found for function {fn_cursor.spelling}: {atoms}")
+    return list(dict.fromkeys(atoms))
+
+def solve_mcdc(_, atoms):
+    fields = {field for field, _ in atoms}
+    logging.debug(f"Solving MC/DC with fields: {fields} and atoms: {atoms}")
+    tests = []
+    z3vars = {name: z3.Int(name) for name in fields}
+    for idx, (field, expr) in enumerate(atoms):
+        for val in [0, 1]:
+            s = z3.Solver()
+            s.add(z3vars[field] == val)
+            for other, _ in atoms:
+                if other != field:
+                    s.add(z3vars[other] == 1)
+            if s.check() == z3.sat:
+                model = s.model()
+                test_vector = {k: model[z3vars[k]].as_long() for k in z3vars}
+                tests.append((f"{field}={val}", test_vector))
+                logging.debug(f"Found SAT for {field}={val}: {test_vector}")
+                break
+            else:
+                logging.warning(f"UNSAT for {field}={val} with others fixed to 1")
+    return tests
+
+def write_test_file(fn, struct_name, cases, out_dir):
+    path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
+    with open(path, 'w') as f:
+        f.write('#include "gtest/gtest.h"\n')
+        f.write(f'#include "{fn.spelling}.h"\n\n')
+        for i, (label, vals) in enumerate(cases, 1):
+            f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) '+'{\n')
+            f.write(f'  {struct_name} in = '+'{ '+', '.join(f'.{k}={v}' for k,v in vals.items())+' };\n')
+            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&in)); // {label}\n')
+            f.write('}\n\n')
+    logging.info(f"Generated: {path}")
+
+def main():
+    if len(sys.argv) != 4:
+        print("Usage: python generate_mcdc_tests.py <src_dir> <include_dir> <test_dir>")
+        return
+    src = normalize_path(sys.argv[1])
+    inc = normalize_path(sys.argv[2])
+    tst = normalize_path(sys.argv[3])
+    os.makedirs(tst, exist_ok=True)
+    load_libclang()
+    types = parse_headers(inc)
+    funcs = parse_functions(src, inc)
+    logging.debug(f"Parsed {len(funcs)} functions.")
+    for fn in funcs:
+        args = list(fn.get_arguments())
+        if not args:
+            logging.warning(f"Function {fn.spelling} has no arguments, skipping.")
+            continue
+        struct_type = args[0].type.spelling.replace('*', '').strip()
+        struct_cursor = types.get(struct_type)
+        if not struct_cursor:
+            logging.warning(f"Struct {struct_type} not found for {fn.spelling}, skipping.")
+            continue
+        fields = {f.spelling for f in struct_cursor.get_children() if f.kind.name == 'FIELD_DECL'}
+        logging.debug(f"Struct {struct_type} fields: {fields}")
+        atoms = gather_conditions(fn, fields)
+        cases = solve_mcdc(fields, atoms)
+        if cases:
+            write_test_file(fn, struct_type, cases, tst)
+        else:
+            logging.warning(f"No MC/DC cases for {fn.spelling}")
+
+if __name__ == '__main__':
+    main()
