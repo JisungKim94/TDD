@@ -39,4 +39,63 @@ def gen_gtest_code(func_name, expr, conds, cases, header_relpath):
         name = f"MC_DC_{testname}_{idx}"
         code.append(f'TEST({testname}, {name}) {{')
         # 표현식을 구성할 a,b,c 같은 변수 명으로 치환 (매우 단순 가정)
-        # 실 사용 시 함수 인자나 전역
+        # 실 사용 시 함수 인자나 전역변수로 호출 예시로 교체 필요
+        args1 = ', '.join(str(int(v)) for v in c1)
+        args2 = ', '.join(str(int(v)) for v in c2)
+        code.append(f'    // Case {idx}: {conds}')
+        code.append(f'    EXPECT_NO_FATAL_FAILURE({func_name}({args1}));')
+        code.append(f'    EXPECT_NO_FATAL_FAILURE({func_name}({args2}));')
+        code.append('}')
+        code.append('')
+    return '\n'.join(code)
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+    # .c 파일 선택
+    c_path = filedialog.askopenfilename(
+        title="테스트케이스를 생성할 .c 파일 선택",
+        filetypes=[("C Source", "*.c")])
+    if not c_path:
+        messagebox.showinfo("취소", "파일 선택이 취소되었습니다.")
+        return
+
+    # 같은 폴더에 헤더(.h)와 작동한다고 가정
+    header = os.path.splitext(os.path.basename(c_path))[0] + '.h'
+    header_path = os.path.join(os.path.dirname(c_path), header)
+    if not os.path.isfile(header_path):
+        messagebox.showerror("오류", f"헤더 파일을 찾을 수 없습니다:\n{header_path}")
+        return
+
+    # 소스코드 읽기
+    with open(c_path, 'r') as f:
+        code = f.read()
+
+    # 함수 호출 예시 찾아보기 (단순 if 구문 패턴)
+    m = re.search(r'\bint\s+(\w+)\s*\([^)]*\)\s*\{[^}]*if\s*\(([^)]+)\)', code, re.DOTALL)
+    if not m:
+        messagebox.showerror("오류", "MC/DC 생성용 if 문을 찾을 수 없습니다.")
+        return
+
+    func_name, expr = m.group(1), m.group(2)
+    conds = extract_conditions(expr)
+    cases = generate_mcdc_cases(conds)
+
+    # 테스트 코드 생성
+    out_dir = os.path.dirname(c_path)
+    out_path = os.path.join(out_dir, 'mcdc_tests.cpp')
+    header_rel = os.path.relpath(header_path, os.path.dirname(out_path)).replace('\\','/')
+
+    try:
+        with open(out_path, 'w') as f:
+            f.write(gen_gtest_code(func_name, expr, conds, cases, header_rel))
+    except Exception as e:
+        messagebox.showerror("오류", f"파일 생성 중 오류:\n{e}")
+        return
+
+    messagebox.showinfo("완료", f"MC/DC 테스트 코드가 생성되었습니다:\n{out_path}")
+
+if __name__ == '__main__':
+    main()
+    # 머고 왜 안올라가
+    
