@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 MC/DC Test Generator for C functions using Clang and Z3
+ Falls back to skeleton tests if no MC/DC atoms found.
 Usage:
   python generate_mcdc_tests.py <src_dir> <include_dir> <test_dir>
 """
@@ -22,14 +23,12 @@ print(f"[INFO] Debug log written to '{log_file}'")
 
 def load_libclang():
     path = os.getenv("LIBCLANG_PATH")
-    logging.debug(f"LIBCLANG_PATH={path}")
     if path and os.path.exists(path):
         try:
             Config.set_library_file(path)
-            logging.debug(f"Loaded libclang from {path}")
             return
-        except LibclangError as e:
-            logging.error(f"Failed to load libclang: {e}")
+        except LibclangError:
+            pass
     for candidate in [
         r"C:\\Program Files\\LLVM\\bin\\libclang.dll",
         r"C:\\Program Files (x86)\\LLVM\\bin\\libclang.dll",
@@ -37,193 +36,149 @@ def load_libclang():
         if os.path.exists(candidate):
             try:
                 Config.set_library_file(candidate)
-                logging.debug(f"Loaded libclang from {candidate}")
                 return
-            except LibclangError as e:
-                logging.error(f"Fallback load failed for {candidate}: {e}")
-    logging.fatal("libclang.dll not found or incompatible.")
+            except LibclangError:
+                continue
+    logging.fatal("libclang.dll not found.")
     sys.exit(1)
 
-def normalize_path(path):
-    abspath = os.path.abspath(path)
-    logging.debug(f"Normalized path: {path} -> {abspath}")
-    return abspath
+def normalize_path(p):
+    return os.path.abspath(p)
 
 def parse_headers(include_dir):
-    logging.debug(f"Parsing headers in {include_dir}")
     index = Index.create()
     types = {}
     for root, _, files in os.walk(include_dir):
         for fname in files:
             if fname.endswith('.h'):
-                full = os.path.join(root, fname)
-                logging.debug(f"Parsing header: {full}")
-                tu = index.parse(full, args=[f'-I{include_dir}'])
+                tu = index.parse(os.path.join(root,fname), args=[f'-I{include_dir}'])
                 for c in tu.cursor.get_children():
                     if c.kind == CursorKind.STRUCT_DECL and c.spelling:
-                        fields = {f.spelling for f in c.get_children() if f.kind.name == 'FIELD_DECL'}
-                        logging.debug(f"Struct {c.spelling} fields: {fields}")
-                        types[c.spelling] = fields
+                        types[c.spelling] = {f.spelling for f in c.get_children() if f.kind.name=='FIELD_DECL'}
     return types
 
 def parse_functions(src_dir, include_dir):
-    logging.debug(f"Parsing sources in {src_dir}")
     index = Index.create()
     funcs = []
-    for root, _, files in os.walk(src_dir):
+    for root,_,files in os.walk(src_dir):
         for fname in files:
             if fname.endswith('.c'):
-                full = os.path.join(root, fname)
-                logging.debug(f"Parsing source: {full}")
-                tu = index.parse(full, args=[f'-I{include_dir}'])
+                tu = index.parse(os.path.join(root,fname), args=[f'-I{include_dir}'])
                 for c in tu.cursor.get_children():
                     if c.kind == CursorKind.FUNCTION_DECL and c.is_definition():
-                        logging.debug(f"Found function: {c.spelling}")
                         funcs.append(c)
     return funcs
 
-def gather_atoms_and_fields(node, fields_map):
-    atoms = []
-    local_map = {}
-    # Scan local variable initializers
-    def scan_locals(n):
-        if n.kind == CursorKind.DECL_STMT:
-            for var in n.get_children():
-                if var.kind == CursorKind.VAR_DECL:
-                    name = var.spelling
-                    sub_atoms = []
-                    for init in var.get_children():
-                        collect_atoms(init, fields_map, sub_atoms)
-                    if sub_atoms:
-                        local_map[name] = sub_atoms
-        for c in n.get_children():
-            scan_locals(c)
-    def collect_atoms(n, fmap, store):
-        if n.kind == CursorKind.MEMBER_REF_EXPR:
-            field = n.spelling
-            base = None
-            for ch in n.get_children():
-                if ch.kind == CursorKind.DECL_REF_EXPR:
-                    base = ch.spelling
-                    break
-            if base in fmap and field in fmap[base]:
-                store.append((f"{base}.{field}", field))
-        elif n.kind == CursorKind.DECL_REF_EXPR:
-            name = n.spelling
-            for base, fields in fmap.items():
-                if name in fields:
-                    store.append((f"{base}.{name}", name))
-        for c in n.get_children():
-            collect_atoms(c, fmap, store)
-    scan_locals(node)
-    # Visit all nodes and propagate
-    def visit(n):
-        if n.kind in (CursorKind.MEMBER_REF_EXPR, CursorKind.DECL_REF_EXPR):
-            collect_atoms(n, fields_map, atoms)
-            if n.kind == CursorKind.DECL_REF_EXPR:
-                nm = n.spelling
-                if nm in local_map:
-                    atoms.extend(local_map[nm])
-        for c in n.get_children():
-            visit(c)
-    visit(node)
-    # Deduplicate
-    uniq = []
-    for a in atoms:
-        if a not in uniq:
-            uniq.append(a)
-    return uniq
-
-def gather_conditions(fn_cursor, fields_map):
-    atoms = []
-    def recurse(n):
-        if n.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT):
-            cond = next(n.get_children(), None)
-            if cond and cond.kind == CursorKind.PAREN_EXPR:
-                cond = next(cond.get_children(), None)
-            if cond:
-                atoms.extend(gather_atoms_and_fields(cond, fields_map))
-        elif n.kind == CursorKind.DECL_STMT:
-            atoms.extend(gather_atoms_and_fields(n, fields_map))
-        for c in n.get_children():
-            recurse(c)
-    recurse(fn_cursor)
-    uniq = []
-    for a in atoms:
-        if a not in uniq:
-            uniq.append(a)
-    logging.debug(f"Atoms for {fn_cursor.spelling}: {uniq}")
-    return uniq
-
-def solve_mcdc(atoms):
-    tests = []
-    z3vars = {key: z3.Int(key.replace('.', '_')) for key, _ in atoms}
-    for key, _ in atoms:
-        for val in (0,1):
-            s = z3.Solver()
-            s.add(z3vars[key] == val)
-            for other in z3vars:
-                if other != key:
-                    s.add(z3vars[other] == 1)
-            if s.check() == z3.sat:
-                m = s.model()
-                vec = {k: m[z3vars[k]].as_long() for k in z3vars}
-                tests.append((key, vec))
-                break
-    return tests
-
-def write_test_file(fn, cases, fields_map, out_dir):
-    params = list(fn.get_arguments())
-    names = [p.spelling for p in params]
-    orig_types = [p.type.spelling.strip() for p in params]
-    base_types = [t.replace('*','').strip() for t in orig_types]
-    is_ptr = ['*' in t for t in orig_types]
-    path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
-    with open(path, 'w') as f:
+def write_skeleton(fn, fields_map, out_dir):
+    path = os.path.join(out_dir, f"testMCDC_{fn.spelling}_skeleton.cpp")
+    with open(path,'w') as f:
         f.write('#include "gtest/gtest.h"\n')
         f.write('#include "mycode.h"\n\n')
-        for i, (atom, vec) in enumerate(cases,1):
+        f.write(f'// Skeleton MC/DC GoogleTest for {fn.spelling}\n')
+        f.write(f'TEST({fn.spelling}_MC_DC, Skeleton) {{\n')
+        # Declare inputs
+        for p in fn.get_arguments():
+            tp = p.type.spelling.replace('*','').strip()
+            nm = p.spelling
+            f.write(f'  {tp} {nm} = {{0}};\n')
+        f.write('  // TODO: initialize fields appropriately\n')
+        # Call
+        args = ', '.join(f'&{p.spelling}' if '*' in p.type.spelling else p.spelling for p in fn.get_arguments())
+        f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}({args}));\n')
+        f.write('}\n')
+    logging.info(f"Generated skeleton: {path}")
+
+def write_test_file(fn, cases, fields_map, out_dir):
+    path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
+    with open(path,'w') as f:
+        f.write('#include "gtest/gtest.h"\n')
+        f.write('#include "mycode.h"\n\n')
+        names = [p.spelling for p in fn.get_arguments()]
+        is_ptr = ['*' in p.type.spelling for p in fn.get_arguments()]
+        for i,(atom,vec) in enumerate(cases,1):
             f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{\n')
-            for nm, tp in zip(names, base_types):
+            # init
+            for p in fn.get_arguments():
+                tp = p.type.spelling.replace('*','').strip()
+                nm = p.spelling
                 f.write(f'  {tp} {nm} = {{0}};\n')
-            for key, v in vec.items():
-                base, field = key.split('.',1)
-                f.write(f'  {base}.{field} = {v};\n')
-            args = []
-            for nm, ptr in zip(names, is_ptr):
-                args.append(f'&{nm}' if ptr else nm)
-            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}({', '.join(args)})); // {atom}\n')
+            # assign
+            for k,v in vec.items(): base,field=k.split('.',1); f.write(f'  {base}.{field} = {v};\n')
+            # call
+            args=', '.join(f'&{n}' if ptr else n for n,ptr in zip(names,is_ptr))
+            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}({args})); // {atom}\n')
             f.write('}\n\n')
     logging.info(f"Generated: {path}")
 
-def main():
-    if len(sys.argv)!=4:
-        print("Usage: python generate_mcdc_tests.py <src_dir> <include_dir> <test_dir>")
-        return
-    src = normalize_path(sys.argv[1])
-    inc = normalize_path(sys.argv[2])
-    tst = normalize_path(sys.argv[3])
-    os.makedirs(tst, exist_ok=True)
-    load_libclang()
-    types = parse_headers(inc)
-    funcs = parse_functions(src, inc)
-    logging.debug(f"Parsed {len(funcs)} functions.")
-    for fn in funcs:
-        fields_map = {}
-        for p in fn.get_arguments():
-            nm = p.spelling
-            tp = p.type.spelling.replace('*','').strip()
-            if tp in types:
-                fields_map[nm] = types[tp]
-        if not fields_map:
-            continue
-        atoms = gather_conditions(fn, fields_map)
-        if not atoms:
-            continue
-        cases = solve_mcdc(atoms)
-        filtered = [(k,v) for k,v in cases if k.split('.',1)[0] in fields_map]
-        if filtered:
-            write_test_file(fn, filtered, fields_map, tst)
+def solve_mcdc(atoms):
+    tests=[]
+    vars={k:z3.Int(k.replace('.','_')) for k,_ in atoms}
+    for k,_ in atoms:
+        for val in (0,1):
+            s=z3.Solver(); s.add(vars[k]==val)
+            for o in vars:
+                if o!=k: s.add(vars[o]==1)
+            if s.check()==z3.sat:
+                m=s.model(); tests.append((k,{v:m[vars[v]].as_long() for v in vars})); break
+    return tests
 
-if __name__=='__main__':
-    main()
+def gather_atoms_and_fields(node, fmap):
+    atoms=[]; local={}
+    def expr_atoms(n,store):
+        if n.kind==CursorKind.MEMBER_REF_EXPR:
+            fld=n.spelling; bs=None
+            for c in n.get_children():
+                if c.kind==CursorKind.DECL_REF_EXPR: bs=c.spelling; break
+            if bs in fmap and fld in fmap[bs]: store.append((f"{bs}.{fld}",fld))
+        elif n.kind==CursorKind.DECL_REF_EXPR:
+            nm=n.spelling
+            for b,fl in fmap.items():
+                if nm in fl: store.append((f"{b}.{nm}",nm))
+        for c in n.get_children(): expr_atoms(c,store)
+    def scan_locals(n):
+        if n.kind==CursorKind.DECL_STMT:
+            for v in n.get_children():
+                if v.kind==CursorKind.VAR_DECL:
+                    sa=[]; expr_atoms(v,sa)
+                    if sa: local[v.spelling]=sa
+        for c in n.get_children(): scan_locals(c)
+    def visit(n):
+        expr_atoms(n,atoms)
+        if n.kind==CursorKind.DECL_REF_EXPR and n.spelling in local: atoms.extend(local[n.spelling])
+        for c in n.get_children(): visit(c)
+    scan_locals(node); visit(node)
+    # dedupe
+    u=[]
+    for a in atoms:
+        if a not in u: u.append(a)
+    return u
+
+def gather_conditions(fn, fmap):
+    at=[]
+    def go(n):
+        if n.kind in (CursorKind.IF_STMT,CursorKind.WHILE_STMT,CursorKind.DECL_STMT):
+            for c in n.get_children(): at.extend(gather_atoms_and_fields(c,fmap))
+        for c in n.get_children(): go(c)
+    go(fn); return list(dict.fromkeys(at))
+
+def main():
+    if len(sys.argv)!=4: print("Usage...\n"); return
+    src,inc,tst=normalize_path(sys.argv[1]),normalize_path(sys.argv[2]),normalize_path(sys.argv[3])
+    os.makedirs(tst,exist_ok=True)
+    load_libclang(); types=parse_headers(inc)
+    funcs=parse_functions(src,inc)
+    for fn in funcs:
+        fmap={}
+        for p in fn.get_arguments():
+            tp=p.type.spelling.replace('*','').strip()
+            if tp in types: fmap[p.spelling]=types[tp]
+        if not fmap: continue
+        atoms=gather_conditions(fn,fmap)
+        if atoms:
+            cases=solve_mcdc(atoms)
+            cases=[(k,v) for k,v in cases if k.split('.',1)[0] in fmap]
+            if cases: write_test_file(fn,cases,fmap,tst)
+            else: write_skeleton(fn,fmap,tst)
+        else: write_skeleton(fn,fmap,tst)
+
+if __name__=='__main__': main()
