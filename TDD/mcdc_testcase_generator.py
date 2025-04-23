@@ -82,22 +82,18 @@ def parse_functions(src_dir, inc_dir):
                         funcs.append(c)
     return funcs
 
-def gather_atoms_and_fields(cond, struct_fields):
+def gather_atoms_and_fields(cond_cursor, struct_fields):
     atoms = []
     def visit(node):
+        # Extract struct field references directly
         if node.kind == CursorKind.MEMBER_REF_EXPR:
-            parent = node.semantic_parent
-            grand = parent.semantic_parent if parent else None
-            if grand and grand.kind == CursorKind.DECL_REF_EXPR:
-                base = grand.spelling
-                field = node.spelling
-                key = f"{base}.{field}"
-                if field in struct_fields:
-                    atoms.append((key, key))
-                    logging.debug(f"Atom detected: {key}")
+            field = node.spelling
+            if field in struct_fields:
+                atoms.append((field, f"{field}"))
+                logging.debug(f"Matched struct field atom: {field}")
         for ch in node.get_children():
             visit(ch)
-    visit(cond)
+    visit(cond_cursor)
     return atoms
 
 def gather_conditions(fn, struct_fields):
