@@ -157,6 +157,11 @@ def solve_mcdc(_, atoms):
 def write_test_file(fn, struct_name, cases, out_dir):
     path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
     with open(path, 'w') as f:
+        f.write('#include "gtest/gtest.h"
+')
+        f.write('#include "mycode.h"
+
+')
         f.write('#include "gtest/gtest.h"\n')
         f.write(f'#include "{fn.spelling}.h"\n\n')
         for i, (label, vals) in enumerate(cases, 1):
