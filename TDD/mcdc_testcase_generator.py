@@ -1,4 +1,4 @@
-# 통합 버전: 구조체 인자 (포인터/값) 처리 + 구조체 멤버 기반 MC/DC 테스트 자동 생성
+# 완성 버전: 구조체 포인터, 값, 기본 타입, enum 타입 포함한 MC/DC 자동 테스트 생성기
 
 import os
 import re
@@ -14,13 +14,21 @@ def read_file(path):
             continue
     raise UnicodeDecodeError(f"Cannot decode {path}")
 
-def parse_structs_from_header(header_code):
+def parse_structs_and_enums(header_code):
     structs = {}
-    typedefs = re.findall(r'typedef\s+struct\s*{([^}]+)}\s*(\w+)\s*;', header_code, re.DOTALL)
-    for body, name in typedefs:
-        members = re.findall(r'\b\w+\s+(\w+);', body)
-        structs[name] = members
-    return structs
+    enums = {}
+
+    typedef_structs = re.findall(r'typedef\s+struct\s*{([^}]+)}\s*(\w+)\s*;', header_code, re.DOTALL)
+    for body, name in typedef_structs:
+        members = re.findall(r'\b(\w+)\s+(\w+);', body)
+        structs[name] = [(typ, var) for typ, var in members]
+
+    typedef_enums = re.findall(r'typedef\s+enum\s*{([^}]+)}\s*(\w+)\s*;', header_code, re.DOTALL)
+    for body, name in typedef_enums:
+        values = re.findall(r'\b(\w+)\b', body)
+        enums[name] = values
+
+    return structs, enums
 
 def extract_function_signature(code):
     match = re.search(r'\b(?:\w+\s+)+(\w+)\s*\(([^)]*)\)', code)
@@ -35,9 +43,9 @@ def extract_function_signature(code):
             continue
         m = re.match(r'(\w+(?:\s*\*)?)\s+(\w+)', p)
         if m:
-            type_part = m.group(1).replace(' ', '')
+            typ = m.group(1).replace(' ', '')
             name = m.group(2)
-            param_info.append((type_part, name))
+            param_info.append((typ, name))
     return func_name, param_info
 
 def extract_condition_variables(expr):
@@ -67,7 +75,7 @@ def parse_boolean_expr(expr, vars_map):
     except Exception:
         return '/* unknown */'
 
-def gen_gtest_code(func_name, if_exprs, param_info, struct_defs, header_relpath):
+def gen_gtest_code(func_name, if_exprs, param_info, struct_defs, enum_defs, header_relpath):
     lines = [
         '#include <gtest/gtest.h>',
         'extern "C" {',
@@ -79,33 +87,40 @@ def gen_gtest_code(func_name, if_exprs, param_info, struct_defs, header_relpath)
     testname = func_name
     for idx, expr in enumerate(if_exprs):
         var_names = extract_condition_variables(expr)
-        struct_vars = defaultdict(list)
+        input_vars = defaultdict(list)
 
-        # 변수이름에 따라 어떤 구조체 멤버인지 추론
-        for typename, varname in param_info:
-            deref = '->' if '*' in typename else '.'
-            for v in var_names:
-                if v.startswith(f'{varname}{deref}'):
-                    member = v.split(deref)[1]
-                    struct_vars[(typename.replace('*', ''), varname)].append(member)
+        for typ, var in param_info:
+            deref = '->' if '*' in typ else '.'
+            for name in var_names:
+                if name.startswith(f'{var}{deref}'):
+                    member = name.split(deref)[1]
+                    input_vars[(typ.replace('*', ''), var)].append(member)
+                elif name == var:
+                    input_vars[(typ, var)].append(None)
 
-        # 테스트케이스 생성
-        for (typename, instancename), members in struct_vars.items():
-            if typename not in struct_defs:
-                continue
-            mcdc_cases = generate_mcdc_cases(members)
-            for case_idx, (c1, c2) in enumerate(mcdc_cases):
+        for (typ, var), members in input_vars.items():
+            for case_idx, (c1, c2) in enumerate(generate_mcdc_cases(members)):
                 for version, values in enumerate([c1, c2]):
                     lines.append(f'TEST({testname}, If{idx}_MC_DC_Case{case_idx}_{version}) {{')
-                    lines.append(f'    {typename} {instancename} = {{')
-                    for i, member in enumerate(members):
-                        lines.append(f'        .{member} = {int(values[i])},')
-                    lines.append(f'    }};')
-                    call_args = []
-                    for t, name in param_info:
-                        call_args.append(f'&{name}' if '*' in t else name)
-                    cond_map = {f'{instancename}->'+members[i] if '*' in t else f'{instancename}.{members[i]}': values[i]
-                                for (t, name) in [param_info[0]] for i in range(len(members))}
+                    decl_line = f'    {typ} {var};'
+                    if typ in struct_defs:
+                        lines.append(f'    {typ} {var} = {{')
+                        for i, m in enumerate(members):
+                            if m is None:
+                                continue
+                            member_type = next((t for t, v in struct_defs[typ] if v == m), 'int')
+                            val = enum_defs[member_type][0] if member_type in enum_defs else int(values[i])
+                            lines.append(f'        .{m} = {val},')
+                        lines.append('    };')
+                    elif typ in enum_defs:
+                        lines.append(f'    {typ} {var} = {enum_defs[typ][0]};')
+                    elif typ == 'float':
+                        lines.append(f'    float {var} = {1.0 if values[0] else 0.0};')
+                    else:
+                        lines.append(f'    {typ} {var} = {int(values[0])};')
+
+                    call_args = [f'&{v}' if '*' in t else v for t, v in param_info]
+                    cond_map = {name: values[i] for i, name in enumerate(var_names)}
                     expected = parse_boolean_expr(expr, cond_map)
                     lines.append(f'    EXPECT_EQ({expected}, {func_name}({", ".join(call_args)}));')
                     lines.append('}')
@@ -131,7 +146,7 @@ def main():
         sys.exit(1)
 
     header_code = read_file(header_path)
-    struct_defs = parse_structs_from_header(header_code)
+    struct_defs, enum_defs = parse_structs_and_enums(header_code)
 
     code = read_file(c_path)
     func_name, param_info = extract_function_signature(code)
@@ -153,7 +168,7 @@ def main():
     header_rel = os.path.relpath(header_path, test_dir).replace('\\', '/')
 
     with open(out_path, 'w', encoding='utf-8') as f:
-        f.write(gen_gtest_code(func_name, all_ifs, param_info, struct_defs, header_rel))
+        f.write(gen_gtest_code(func_name, all_ifs, param_info, struct_defs, enum_defs, header_rel))
 
     print(f"[SUCCESS] Generated: {out_path}")
 
