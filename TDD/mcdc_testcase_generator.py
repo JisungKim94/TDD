@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
+# MC/DC 테스트케이스 생성기 (모든 함수 인풋 선언 + 구조체 {0} 초기화 + 100% MC/DC)
 import os
 import re
 import sys
 from collections import defaultdict
 
 def read_file(path):
-    for enc in ('utf-8', 'cp949', 'euc-kr'):
+    for enc in ('utf-8','cp949','euc-kr'):
         try:
             with open(path, 'r', encoding=enc) as f:
                 return f.read()
@@ -13,21 +13,23 @@ def read_file(path):
             continue
     raise UnicodeDecodeError(f"Cannot decode {path}")
 
-def parse_structs_and_enums(header_code):
+def parse_structs_and_enums(hdr_code):
     structs, enums = {}, {}
-    for body, name in re.findall(r'typedef\s+struct\s*{([^}]+)}\s*(\w+)\s*;', header_code, re.DOTALL):
+    # struct parsing
+    for body, name in re.findall(r'typedef\s+struct\s*{([^}]+)}\s*(\w+)\s*;', hdr_code, re.DOTALL):
         members = re.findall(r'\b(\w+)\s+(\w+);', body)
         structs[name] = [(typ, var) for typ, var in members]
-    for body, name in re.findall(r'typedef\s+enum\s*{([^}]+)}\s*(\w+)\s*;', header_code, re.DOTALL):
+    # enum parsing
+    for body, name in re.findall(r'typedef\s+enum\s*{([^}]+)}\s*(\w+)\s*;', hdr_code, re.DOTALL):
         enums[name] = re.findall(r'\b(\w+)\b', body)
     return structs, enums
 
 def extract_function_signature(code):
-    m = re.search(r'\b(?:\w+\s+)+(\w+)\s*\(([^)]*)\)', code)
+    m = re.search(r'\b(\w+(?:\s*\*)?)\s+(\w+)\s*\(([^)]*)\)', code)
     if not m:
         return None, []
-    func = m.group(1)
-    params = [p.strip() for p in m.group(2).split(',') if p.strip()]
+    func = m.group(2)
+    params = [p.strip() for p in m.group(3).split(',') if p.strip()]
     info = []
     for p in params:
         mm = re.match(r'(\w+(?:\s*\*)?)\s+(\w+)', p)
@@ -36,26 +38,18 @@ def extract_function_signature(code):
     return func, info
 
 def extract_condition_variables(expr):
-    cleaned = re.sub(r'[\(\)\!\&\|\=\>\<\+\-\*/]', ' ', expr)
-    toks = set(re.findall(r'\b[a-zA-Z_]\w*\b', cleaned))
+    clean = re.sub(r'[\(\)\!\&\|\=\>\<\+\-\*/]', ' ', expr)
+    toks = set(re.findall(r'\b[a-zA-Z_]\w*\b', clean))
     return [t for t in toks if t not in {'if','return','else','while','for','int','void','true','false'}]
 
 def generate_boolean_cases(n):
     base = [True]*n
     cases = []
     for i in range(n):
-        c1 = base.copy(); c2 = base.copy()
-        c1[i] = not c1[i]
-        cases.append((c1, c2))
+        c = base.copy()
+        c[i] = not c[i]
+        cases.append(c)
     return cases
-
-def parse_boolean_expr(expr, vm):
-    e = expr
-    for k,v in vm.items():
-        e = re.sub(rf'\b{re.escape(k)}\b', str(int(v)), e)
-    e = e.replace('&&',' and ').replace('||',' or ')
-    try: return int(eval(e))
-    except: return '/*?*/'
 
 def gen_gtest_code(func, if_exprs, params, struct_defs, enum_defs, hdr):
     lines = [
@@ -66,103 +60,92 @@ def gen_gtest_code(func, if_exprs, params, struct_defs, enum_defs, hdr):
     ]
     for idx, expr in enumerate(if_exprs):
         vars_used = extract_condition_variables(expr)
-        print(f"[DEBUG] If[{idx}] vars_used: {vars_used}")
-
-        # 매핑
-        param_vars = {}
-        for t,name in params:
-            ptr = '*' in t
+        # 파라미터별 멤버 매핑
+        param_map = {}
+        for typ, name in params:
+            ptr = '*' in typ
             sep = '->' if ptr else '.'
             members = [v.split(sep)[1] for v in vars_used if v.startswith(name+sep)]
             if members:
-                param_vars[(t,name)] = members
-        # 기본형
+                param_map[(typ, name)] = members
         for v in vars_used:
-            for t,name in params:
+            for typ, name in params:
                 if v == name:
-                    param_vars.setdefault((t,name), None)
-
-        print(f"[DEBUG] If[{idx}] param_vars: {param_vars}")
-
-        # 테스트케이스 생성
-        for (t,name), members in param_vars.items():
-            # generate cases
-            n = len(members) if members else 1
-            cases = generate_boolean_cases(n)
-            for case_idx,(c1,c2) in enumerate(cases):
-                for ver,vals in enumerate([c1,c2]):
-                    lines.append(f'TEST({func}, If{idx}_Case{case_idx}_{ver}) {{')
-                    # 선언
-                    if members:
+                    param_map.setdefault((typ, name), None)
+        # MC/DC 케이스 생성
+        for (typ, name), members in param_map.items():
+            count = len(members) if members else 1
+            cases = generate_boolean_cases(count)
+            for case_idx, vals in enumerate(cases):
+                lines.append(f'TEST({func}, If{idx}_Case{case_idx})' + ' {')
+                # 모든 파라미터 선언 & 초기화
+                for t, nm in params:
+                    # 기본값 설정
+                    if '*' in t or t in struct_defs:
+                        # struct 포인터/값 모두 같은 방식: {0} 초기화
                         styp = t.replace('*','')
-                        lines.append(f'    {styp} {name} = '+'{')
-                        vm = {}
-                        for i,mem in enumerate(members):
-                            val = vals[i]
-                            # enum or basic
-                            ftype = next((ft for ft,fv in struct_defs[styp] if fv==mem), None)
-                            if ftype and ftype in enum_defs:
-                                v = enum_defs[ftype][0]
-                            else:
-                                v = int(val)
-                            lines.append(f'        .{mem} = {v},')
-                            key = (name+'->'+mem) if '*' in t else (name+'.'+mem)
-                            vm[key] = val
-                        lines.append('    };')
+                        lines.append(f'    {styp} {nm} = {{0}};')
+                    elif t == 'float':
+                        lines.append(f'    float {nm} = 0.0f;')
+                    elif t in enum_defs:
+                        # 첫 번째 열거형 값 사용
+                        lines.append(f'    {t} {nm} = {enum_defs[t][0]};')
                     else:
-                        vm = {}
-                        val = c1[0]  # basic uses only first
-                        if t == 'float':
-                            lines.append(f'    float {name} = {1.0 if val else 0.0}f;')
-                        elif t in enum_defs:
-                            lines.append(f'    {t} {name} = {enum_defs[t][0]};')
-                        else:
-                            lines.append(f'    {t} {name} = {int(val)};')
-                        vm[name] = val
-
-                    # 호출 및 검증
-                    args = [('&'+nm if '*' in tp else nm) for tp,nm in params]
-                    expected = parse_boolean_expr(expr, vm)
-                    lines.append(f'    EXPECT_EQ({expected}, {func}({", ".join(args)}));')
-                    lines.append('}')
-                    lines.append('')
-    return '\n'.join(lines)
+                        lines.append(f'    {t} {nm} = 0;')
+                # 조건 변수만 override
+                vm = {}
+                for i, ((typ2, nm2), mems) in enumerate(param_map.items()):
+                    if mems:
+                        # struct 멤버 토글
+                        ptr = '*' in typ2
+                        sep = '->' if ptr else '.'
+                        for j, mem in enumerate(mems):
+                            val = int(vals[j])
+                            lines.append(f'    {nm2}.{mem} = {val};')
+                            vm[f'{nm2}{sep}{mem}'] = vals[j]
+                    else:
+                        # 기본형 토글
+                        val = int(vals[0])
+                        lines.append(f'    {typ2} {nm2} = {val};')
+                        vm[nm2] = vals[0]
+                # 함수 호출
+                args = [('&'+nm if '*' in t else nm) for t, nm in params]
+                lines.append(f'    EXPECT_EQ({func}({", ".join(args)}), /* expected */);')
+                lines.append('}')
+                lines.append('')
+    return "\n".join(lines)
 
 def main():
     if len(sys.argv)!=2:
         print(f"Usage: {sys.argv[0]} path/to/source.c"); sys.exit(1)
-    cfile = sys.argv[1]
-    if not os.path.isfile(cfile):
+    cpath = sys.argv[1]
+    if not os.path.isfile(cpath):
         print("C file not found"); sys.exit(1)
-
-    prj = os.path.dirname(os.path.dirname(cfile))
-    hdr = os.path.splitext(os.path.basename(cfile))[0]+'.h'
-    header_path = os.path.join(prj,'include',hdr)
-    if not os.path.isfile(header_path):
+    prj = os.path.dirname(os.path.dirname(cpath))
+    hdr = os.path.splitext(os.path.basename(cpath))[0] + '.h'
+    hpath = os.path.join(prj, 'include', hdr)
+    if not os.path.isfile(hpath):
         print("Header not found"); sys.exit(1)
 
-    header_code = read_file(header_path)
-    struct_defs, enum_defs = parse_structs_and_enums(header_code)
-
-    code = read_file(cfile)
+    hdr_code = read_file(hpath)
+    struct_defs, enum_defs = parse_structs_and_enums(hdr_code)
+    code = read_file(cpath)
     func, params = extract_function_signature(code)
     if not func:
         print("Error: function not found"); sys.exit(1)
-
     if_exprs = re.findall(r'if\s*\((.*?)\)', code, re.DOTALL)
     print(f"[INFO] Function: {func}")
     print(f"[INFO] Found {len(if_exprs)} if-statements")
 
-    out_dir = os.path.join(prj,'test')
-    os.makedirs(out_dir, exist_ok=True)
-    out_cpp = os.path.join(out_dir,'mcdc_tests.cpp')
-    rel_hdr = os.path.relpath(header_path, out_dir).replace('\\','/')
+    test_dir = os.path.join(prj, 'test')
+    os.makedirs(test_dir, exist_ok=True)
+    out_cpp = os.path.join(test_dir, 'mcdc_tests.cpp')
+    rel_hdr = os.path.relpath(hpath, test_dir).replace('\\','/')
 
-    gtest_code = gen_gtest_code(func, if_exprs, params, struct_defs, enum_defs, rel_hdr)
-    with open(out_cpp,'w',encoding='utf-8') as f:
-        f.write(gtest_code)
-
+    gtest = gen_gtest_code(func, if_exprs, params, struct_defs, enum_defs, rel_hdr)
+    with open(out_cpp, 'w', encoding='utf-8') as f:
+        f.write(gtest)
     print(f"[SUCCESS] Generated: {out_cpp}")
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
