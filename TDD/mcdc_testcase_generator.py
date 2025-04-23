@@ -161,24 +161,58 @@ def gather_conditions(fn, fmap):
         for c in n.get_children(): go(c)
     go(fn); return list(dict.fromkeys(at))
 
-def main():
-    if len(sys.argv)!=4: print("Usage...\n"); return
-    src,inc,tst=normalize_path(sys.argv[1]),normalize_path(sys.argv[2]),normalize_path(sys.argv[3])
-    os.makedirs(tst,exist_ok=True)
-    load_libclang(); types=parse_headers(inc)
-    funcs=parse_functions(src,inc)
-    for fn in funcs:
-        fmap={}
-        for p in fn.get_arguments():
-            tp=p.type.spelling.replace('*','').strip()
-            if tp in types: fmap[p.spelling]=types[tp]
-        if not fmap: continue
-        atoms=gather_conditions(fn,fmap)
-        if atoms:
-            cases=solve_mcdc(atoms)
-            cases=[(k,v) for k,v in cases if k.split('.',1)[0] in fmap]
-            if cases: write_test_file(fn,cases,fmap,tst)
-            else: write_skeleton(fn,fmap,tst)
-        else: write_skeleton(fn,fmap,tst)
+def has_conditions(fn_cursor):
+    """Return True if function contains any conditional statements."""
+    found = False
+    def recurse(n):
+        nonlocal found
+        if n.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT, CursorKind.CONDITIONAL_OPERATOR):
+            found = True
+            return
+        for c in n.get_children():
+            if not found:
+                recurse(c)
+    recurse(fn_cursor)
+    return found
 
-if __name__=='__main__': main()
+
+def main():
+    if len(sys.argv) != 4:
+        print("Usage: python generate_mcdc_tests.py <src_dir> <include_dir> <test_dir>")
+        return
+    src = normalize_path(sys.argv[1])
+    inc = normalize_path(sys.argv[2])
+    tst = normalize_path(sys.argv[3])
+    os.makedirs(tst, exist_ok=True)
+    load_libclang()
+    types = parse_headers(inc)
+    funcs = parse_functions(src, inc)
+    logging.debug(f"Parsed {len(funcs)} functions.")
+
+    for fn in funcs:
+        # Determine if function has any conditional statements
+        if has_conditions(fn):
+            # Always generate skeleton for functions with conditionals
+            write_skeleton(fn, {}, tst)
+        # Build map of parameter names to struct fields
+        params = list(fn.get_arguments())
+        fields_map = {}
+        for p in params:
+            nm = p.spelling
+            tp = p.type.spelling.replace('*','').strip()
+            if tp in types:
+                fields_map[nm] = types[tp]
+        if not fields_map:
+            continue
+        atoms = gather_conditions(fn, fields_map)
+        if not atoms:
+            continue
+        cases = solve_mcdc(atoms)
+        # Filter cases by valid parameter base
+        filtered = [(k,v) for k,v in cases if k.split('.',1)[0] in fields_map]
+        if filtered:
+            write_test_file(fn, filtered, fields_map, tst)
+
+if __name__ == '__main__':
+    main()
+ main()
