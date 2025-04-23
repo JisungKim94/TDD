@@ -14,12 +14,28 @@ from clang.cindex import Config, Index, CursorKind
 
 # Attempt to load libclang from environment if provided
 libclang_path = os.getenv("LIBCLANG_PATH")
-if libclang_path:
+if libclang_path and os.path.exists(libclang_path):
     Config.set_library_file(libclang_path)
 else:
-    # If no env var, rely on system default search paths
-    # On Windows, ensure libclang.dll is in PATH or same dir as this script
-    pass
+    # Try common LLVM install locations on Windows
+    possible_paths = [
+        "C:\Program Files\LLVM\bin\libclang.dll",
+        "C:\Program Files (x86)\LLVM\bin\libclang.dll",
+    ]
+    found = False
+    for p in possible_paths:
+        if os.path.exists(p):
+            Config.set_library_file(p)
+            found = True
+            break
+    if not found:
+        sys.stderr.write(
+            "Error: libclang.dll not found.
+"
+            "Install LLVM or set LIBCLANG_PATH to the full path of libclang.dll.
+"
+        )
+        sys.exit(1)
 
 
 def parse_headers(include_path):
