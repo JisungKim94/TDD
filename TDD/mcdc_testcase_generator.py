@@ -122,17 +122,30 @@ def gather_atoms_and_fields(node, fields_map):
 def gather_conditions(fn_cursor, fields_map):
     """
     Traverse function AST to extract all condition atoms for MC/DC.
-    Scans IF_STMT, WHILE_STMT, and conditional expressions.
-    Also inspects DECL_STMT for ternary operators.
+    Handles if/while conditions and local DECL_STMT initializers (ternary, binary ops).
     """
     atoms = []
-    def recurse(n):
-        if n.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT, CursorKind.CONDITIONAL_OPERATOR, CursorKind.DECL_STMT):
-            # Extract the expression child
-            cond = next(n.get_children(), None)
-            if cond is not None:
+    def recurse(node):
+        logging.debug(f"[COND_VISIT] node={node.kind} spelling={node.spelling}")
+        # IF and WHILE statements
+        if node.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT):
+            cond = next(node.get_children(), None)
+            # Skip parentheses
+            if cond and cond.kind == CursorKind.PAREN_EXPR:
+                cond = next(cond.get_children(), None)
+            if cond:
+                logging.debug(f"[COND_EXPR] kind={cond.kind} spelling={cond.spelling}")
                 atoms.extend(gather_atoms_and_fields(cond, fields_map))
-        for c in n.get_children():
+        # Local variable declarations with initializer (includes ternary)
+        elif node.kind == CursorKind.DECL_STMT:
+            for var in node.get_children():
+                if var.kind == CursorKind.VAR_DECL:
+                    for init in var.get_children():
+                        if init.kind in (CursorKind.UNEXPOSED_EXPR, CursorKind.BINARY_OPERATOR, CursorKind.CONDITIONAL_OPERATOR):
+                            logging.debug(f"[DECL_INIT] kind={init.kind} spelling={init.spelling}")
+                            atoms.extend(gather_atoms_and_fields(init, fields_map))
+        # Recurse into children
+        for c in node.get_children():
             recurse(c)
     recurse(fn_cursor)
     # Deduplicate
