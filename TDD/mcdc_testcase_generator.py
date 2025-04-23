@@ -14,17 +14,23 @@ from clang.cindex import Config, Index, CursorKind
 
 # Attempt to load libclang from environment if provided
 libclang_path = os.getenv("LIBCLANG_PATH")
+print(f"[DEBUG] LIBCLANG_PATH = {libclang_path}")
 if libclang_path and os.path.exists(libclang_path):
+    print(f"[DEBUG] Loading libclang from LIBCLANG_PATH: {libclang_path}")
     Config.set_library_file(libclang_path)
 else:
     # Try common LLVM install locations on Windows
     possible_paths = [
-        "C:\Program Files\LLVM\bin\libclang.dll",
-        "C:\Program Files (x86)\LLVM\bin\libclang.dll",
+        r"C:\Program Files\LLVM\bin\libclang.dll",
+        r"C:\Program Files (x86)\LLVM\bin\libclang.dll",
     ]
+    print("[DEBUG] Checking fallback paths for libclang.dll...")
     found = False
     for p in possible_paths:
-        if os.path.exists(p):
+        exists = os.path.exists(p)
+        print(f"[DEBUG] Path {p} exists? {exists}")
+        if exists:
+            print(f"[DEBUG] Loading libclang from: {p}")
             Config.set_library_file(p)
             found = True
             break
