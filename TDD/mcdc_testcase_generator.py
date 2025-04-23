@@ -4,15 +4,22 @@ MC/DC Test Generator for C functions using Clang and Z3
 Usage:
   python generate_mcdc_tests.py <src_dir> <include_dir> <test_dir>
 
-- Parses all headers under <include_dir> to collect struct and enum definitions.
-- Parses all .c files under <src_dir>, extracts functions and their conditional atoms.
-- Uses Z3 to solve for MC/DC vectors for each atomic condition.
-- Emits GoogleTest .cpp files under <test_dir> with EXPECT_NO_FATAL_FAILURE checks.
+Before running, ensure libclang shared library is locatable.
+You can set the environment variable LIBCLANG_PATH to the full path of your libclang.dll (Windows) or libclang.so (Linux) or libclang.dylib (macOS).
 """
 import os
 import sys
-from clang.cindex import Index, CursorKind, TypeKind
-from z3 import Solver, Int, Bool
+import z3
+from clang.cindex import Config, Index, CursorKind
+
+# Attempt to load libclang from environment if provided
+libclang_path = os.getenv("LIBCLANG_PATH")
+if libclang_path:
+    Config.set_library_file(libclang_path)
+else:
+    # If no env var, rely on system default search paths
+    # On Windows, ensure libclang.dll is in PATH or same dir as this script
+    pass
 
 
 def parse_headers(include_path):
@@ -46,10 +53,10 @@ def parse_functions(src_path, include_path):
     return funcs
 
 
-def extract_atoms(expr):
-    """Naive placeholder: return atomic sub-expressions as strings"""
+def extract_atoms(expr_cursor):
+    """Placeholder: return atomic sub-expressions as strings"""
     # TODO: implement AST-based splitting for &&, ||, ?:, comparisons, etc.
-    text = expr.spelling or expr.displayname or ''
+    text = expr_cursor.spelling or expr_cursor.displayname or ''
     return [text] if text else []
 
 
@@ -58,35 +65,40 @@ def gather_conditions(fn_cursor):
     atoms = []
     def recurse(node):
         if node.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT, CursorKind.CONDITIONAL_OPERATOR):
-            cond = list(node.get_children())[0]
-            atoms.extend(extract_atoms(cond))
-        for ch in node.get_children(): recurse(ch)
+            cond = next(node.get_children(), None)
+            if cond:
+                atoms.extend(extract_atoms(cond))
+        for ch in node.get_children():
+            recurse(ch)
     recurse(fn_cursor)
-    return list(dict.fromkeys(atoms))  # unique
+    # unique
+    seen = set()
+    unique_atoms = []
+    for a in atoms:
+        if a not in seen:
+            seen.add(a)
+            unique_atoms.append(a)
+    return unique_atoms
 
 
 def solve_mcdc(struct_cursor, atoms):
     """For each atom, solve for a test vector toggling that atom"""
-    # Build Z3 variables for struct fields
     fields = {}
     for f in struct_cursor.get_children():
-        if f.kind == CursorKind.FIELD_DECL:
+        if f.kind.name == 'FIELD_DECL':
             name = f.spelling
-            # treat all numeric/enum as Int
-            fields[name] = Int(name)
+            fields[name] = z3.Int(name)
 
     baseline = {name: 0 for name in fields}
     tests = []
     for atom in atoms:
-        s = Solver()
-        # force one atom true, others baseline
-        # This is placeholder: assume atom corresponds to a single field
+        s = z3.Solver()
         if atom in fields:
             s.add(fields[atom] == 1)
             for n, val in baseline.items():
                 if n != atom:
                     s.add(fields[n] == val)
-            if s.check().sat:
+            if s.check() == z3.sat:
                 m = s.model()
                 vec = {n: m[fields[n]].as_long() for n in fields}
                 tests.append((atom, vec))
@@ -100,10 +112,10 @@ def write_test_file(fn_cursor, struct_name, cases, out_dir):
     with open(path, 'w') as f:
         f.write('#include "gtest/gtest.h"\n')
         f.write(f'#include "{fn_cursor.spelling}.h"\n\n')
-        for idx, (atom, vec) in enumerate(cases, 1):
+        for idx, (atom, vec) in enumerate(cases, start=1):
             f.write(f'TEST({fn_cursor.spelling}_MC_DC, Case{idx}) ' + '{\n')
             f.write(f'    {struct_name} in = '+'{')
-            f.write(', '.join(f'.{k}={v}' for k, v in vec.items()))
+            f.write(', '.join(f'.{k} = {v}' for k, v in vec.items()))
             f.write('};\n')
             f.write(f'    EXPECT_NO_FATAL_FAILURE({fn_cursor.spelling}(&in));\n')
             f.write('}\n\n')
@@ -124,7 +136,6 @@ def main():
         args = list(fn.get_arguments())
         if not args:
             continue
-        # assume first argument is a pointer to struct
         struct_type = args[0].type.spelling.replace('*', '').strip()
         struct_cursor = types.get(struct_type)
         if not struct_cursor:
