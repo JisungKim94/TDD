@@ -166,24 +166,32 @@ def gather_conditions(fn_cursor, fields_map):
     return uniq
 
 
-def solve_mcdc(fields, atoms):
+def solve_mcdc(atoms):
     """
-    Generate MC/DC test vectors by toggling each atom's field while others are true.
+    Generate MC/DC test vectors by toggling each atom's condition while others are true.
+    atoms: list of ("base.field", field_name)
+    Returns list of (atom_key, {atom_key: value, ...})
     """
     tests = []
-    z3vars = {f: z3.Int(f) for f in fields}
-    for atom, _ in atoms:
-        fld = atom.split('.', 1)[1]
+    # Create Z3 variables for each atomic condition
+    z3vars = {atom_key: z3.Int(atom_key.replace('.', '_')) for atom_key, _ in atoms}
+    for atom_key, _ in atoms:
         for val in (0, 1):
             s = z3.Solver()
-            for f in fields:
-                s.add(z3vars[f] == (val if f == fld else 1))
+            # Set target atom
+            s.add(z3vars[atom_key] == val)
+            # Set all other atoms to true (1)
+            for other_key in z3vars:
+                if other_key != atom_key:
+                    s.add(z3vars[other_key] == 1)
             if s.check() == z3.sat:
                 m = s.model()
-                vec = {f: m[z3vars[f]].as_long() for f in fields}
-                tests.append((atom, vec))
-                logging.debug(f"Test vec for {atom}: {vec}")
+                vec = {key: m[z3vars[key]].as_long() for key in z3vars}
+                tests.append((atom_key, vec))
+                logging.debug(f"Found SAT for {atom_key}={val}: {vec}")
                 break
+            else:
+                logging.debug(f"UNSAT for {atom_key}={val}")
     return tests
 
 
