@@ -4,59 +4,62 @@ MC/DC Test Generator for C functions using Clang and Z3
 Usage:
   python generate_mcdc_tests.py <src_dir> <include_dir> <test_dir>
 
-Before running, ensure libclang shared library is locatable.
-You can set the environment variable LIBCLANG_PATH to the full path of your libclang.dll (Windows) or libclang.so (Linux) or libclang.dylib (macOS).
+Before running, ensure libclang shared library is locatable and version-compatible with clang.cindex.
+You can set LIBCLANG_PATH to your libclang.dll path, or install LLVM >=10 on Windows.
 """
 import os
 import sys
 import z3
-from clang.cindex import Config, Index, CursorKind
+from clang.cindex import Config, Index, CursorKind, LibclangError
 
-# Attempt to load libclang from environment if provided
+# Load libclang with version-check
 libclang_path = os.getenv("LIBCLANG_PATH")
 print(f"[DEBUG] LIBCLANG_PATH = {libclang_path}")
+loaded = False
 if libclang_path and os.path.exists(libclang_path):
-    print(f"[DEBUG] Loading libclang from LIBCLANG_PATH: {libclang_path}")
-    Config.set_library_file(libclang_path)
-else:
+    try:
+        Config.set_library_file(libclang_path)
+        loaded = True
+        print(f"[DEBUG] Loaded libclang from LIBCLANG_PATH: {libclang_path}")
+    except LibclangError as e:
+        sys.stderr.write(f"Error loading libclang from {libclang_path}: {e}\n")
+
+if not loaded:
     # Try common LLVM install locations on Windows
-    possible_paths = [
+    possible = [
         r"C:\Program Files\LLVM\bin\libclang.dll",
         r"C:\Program Files (x86)\LLVM\bin\libclang.dll",
     ]
-    print("[DEBUG] Checking fallback paths for libclang.dll...")
-    found = False
-    for p in possible_paths:
-        exists = os.path.exists(p)
-        print(f"[DEBUG] Path {p} exists? {exists}")
-        if exists:
-            print(f"[DEBUG] Loading libclang from: {p}")
-            Config.set_library_file(p)
-            found = True
-            break
-    if not found:
-        sys.stderr.write(
-            "Error: libclang.dll not found.
-"
-            "Install LLVM or set LIBCLANG_PATH to the full path of libclang.dll.
-"
-        )
-        sys.exit(1)
+    for p in possible:
+        print(f"[DEBUG] Checking {p}")
+        if os.path.exists(p):
+            try:
+                Config.set_library_file(p)
+                loaded = True
+                print(f"[DEBUG] Loaded libclang from: {p}")
+                break
+            except LibclangError as e:
+                sys.stderr.write(f"Error loading libclang from {p}: {e}\n")
+
+if not loaded:
+    sys.stderr.write(
+        "Fatal: libclang.dll not found or incompatible.\n"
+        "Please install LLVM >=10 (https://llvm.org) or set LIBCLANG_PATH.\n"
+    )
+    sys.exit(1)
 
 
 def parse_headers(include_path):
     """Recursively parse headers to collect struct/enum definitions"""
-    types = {}
     index = Index.create()
+    types = {}
     for root, _, files in os.walk(include_path):
         for fname in files:
             if fname.endswith('.h'):
-                path = os.path.join(root, fname)
-                tu = index.parse(path, args=[f'-I{include_path}'])
+                tu = index.parse(os.path.join(root, fname), args=[f'-I{include_path}'])
                 for c in tu.cursor.get_children():
-                    if c.kind in (CursorKind.STRUCT_DECL, CursorKind.ENUM_DECL, CursorKind.TYPEDEF_DECL):
-                        if c.spelling:
-                            types[c.spelling] = c
+                    if c.kind in (CursorKind.STRUCT_DECL, CursorKind.ENUM_DECL, CursorKind.TYPEDEF_DECL) and c.spelling:
+                        types[c.spelling] = c
     return types
 
 
@@ -67,108 +70,87 @@ def parse_functions(src_path, include_path):
     for root, _, files in os.walk(src_path):
         for fname in files:
             if fname.endswith('.c'):
-                path = os.path.join(root, fname)
-                tu = index.parse(path, args=[f'-I{include_path}'])
+                tu = index.parse(os.path.join(root, fname), args=[f'-I{include_path}'])
                 for c in tu.cursor.get_children():
                     if c.kind == CursorKind.FUNCTION_DECL and c.is_definition():
                         funcs.append(c)
     return funcs
 
 
-def extract_atoms(expr_cursor):
-    """Placeholder: return atomic sub-expressions as strings"""
-    # TODO: implement AST-based splitting for &&, ||, ?:, comparisons, etc.
-    text = expr_cursor.spelling or expr_cursor.displayname or ''
+def extract_atoms(expr):
+    """Extract atomic expressions from a condition cursor"""
+    # TODO: implement splitting for &&, ||, ?:, comparisons, etc.
+    text = expr.spelling or expr.displayname or ''
     return [text] if text else []
 
 
 def gather_conditions(fn_cursor):
-    """Walk AST to collect all atomic conditions in a function"""
+    """Collect unique atomic conditions from function AST"""
     atoms = []
     def recurse(node):
         if node.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT, CursorKind.CONDITIONAL_OPERATOR):
             cond = next(node.get_children(), None)
             if cond:
                 atoms.extend(extract_atoms(cond))
-        for ch in node.get_children():
-            recurse(ch)
+        for ch in node.get_children(): recurse(ch)
     recurse(fn_cursor)
-    # unique
-    seen = set()
-    unique_atoms = []
+    # unique preserving order
+    seen = set(); unique = []
     for a in atoms:
         if a not in seen:
-            seen.add(a)
-            unique_atoms.append(a)
-    return unique_atoms
+            seen.add(a); unique.append(a)
+    return unique
 
 
 def solve_mcdc(struct_cursor, atoms):
-    """For each atom, solve for a test vector toggling that atom"""
-    fields = {}
-    for f in struct_cursor.get_children():
-        if f.kind.name == 'FIELD_DECL':
-            name = f.spelling
-            fields[name] = z3.Int(name)
-
-    baseline = {name: 0 for name in fields}
+    """For each atomic condition, produce a test vector toggling it"""
+    fields = {f.spelling: z3.Int(f.spelling)
+              for f in struct_cursor.get_children() if f.kind.name=='FIELD_DECL'}
+    baseline = {n: 0 for n in fields}
     tests = []
     for atom in atoms:
+        if atom not in fields: continue
         s = z3.Solver()
-        if atom in fields:
-            s.add(fields[atom] == 1)
-            for n, val in baseline.items():
-                if n != atom:
-                    s.add(fields[n] == val)
-            if s.check() == z3.sat:
-                m = s.model()
-                vec = {n: m[fields[n]].as_long() for n in fields}
-                tests.append((atom, vec))
+        s.add(fields[atom] == 1)
+        for n, v in baseline.items():
+            if n!=atom: s.add(fields[n]==v)
+        if s.check()==z3.sat:
+            m = s.model()
+            tests.append((atom, {n:m[fields[n]].as_long() for n in fields}))
     return tests
 
 
-def write_test_file(fn_cursor, struct_name, cases, out_dir):
-    """Generate GoogleTest .cpp file for one function"""
-    fname = f"{fn_cursor.spelling}_mcdc_test.cpp"
-    path = os.path.join(out_dir, fname)
-    with open(path, 'w') as f:
+def write_test_file(fn, struct_name, cases, out_dir):
+    """Emit GoogleTest .cpp file for MC/DC cases"""
+    path = os.path.join(out_dir, f"{fn.spelling}_mcdc_test.cpp")
+    with open(path,'w') as f:
         f.write('#include "gtest/gtest.h"\n')
-        f.write(f'#include "{fn_cursor.spelling}.h"\n\n')
-        for idx, (atom, vec) in enumerate(cases, start=1):
-            f.write(f'TEST({fn_cursor.spelling}_MC_DC, Case{idx}) ' + '{\n')
-            f.write(f'    {struct_name} in = '+'{')
-            f.write(', '.join(f'.{k} = {v}' for k, v in vec.items()))
-            f.write('};\n')
-            f.write(f'    EXPECT_NO_FATAL_FAILURE({fn_cursor.spelling}(&in));\n')
+        f.write(f'#include "{fn.spelling}.h"\n\n')
+        for i,(atom,vec) in enumerate(cases,1):
+            f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) '+'{\n')
+            f.write(f'  {struct_name} in '+'{ '+', '.join(f'.{k}={v}' for k,v in vec.items())+' };\n')
+            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&in));\n')
             f.write('}\n\n')
-    print(f"Generated {path}")
+    print(f"Generated: {path}")
 
 
 def main():
-    if len(sys.argv) != 4:
+    if len(sys.argv)!=4:
         print("Usage: python generate_mcdc_tests.py <src_dir> <include_dir> <test_dir>")
-        return
-    src_dir, inc_dir, tst_dir = sys.argv[1:]
-    os.makedirs(tst_dir, exist_ok=True)
-
-    types = parse_headers(inc_dir)
-    funcs = parse_functions(src_dir, inc_dir)
-
+        sys.exit(1)
+    src,inc,tst=sys.argv[1:]
+    os.makedirs(tst,exist_ok=True)
+    types=parse_headers(inc)
+    funcs=parse_functions(src,inc)
     for fn in funcs:
-        args = list(fn.get_arguments())
-        if not args:
-            continue
-        struct_type = args[0].type.spelling.replace('*', '').strip()
-        struct_cursor = types.get(struct_type)
-        if not struct_cursor:
-            print(f"Struct {struct_type} not found for {fn.spelling}")
-            continue
-        atoms = gather_conditions(fn)
-        cases = solve_mcdc(struct_cursor, atoms)
-        if cases:
-            write_test_file(fn, struct_type, cases, tst_dir)
-        else:
-            print(f"No MC/DC cases found for {fn.spelling}")
+        args=list(fn.get_arguments())
+        if not args: continue
+        st=args[0].type.spelling.replace('*','').strip()
+        sc=types.get(st)
+        if not sc: print(f"Struct {st} not found for {fn.spelling}"); continue
+        at=gather_conditions(fn)
+        cs=solve_mcdc(sc,at)
+        if cs: write_test_file(fn,st,cs,tst)
+        else: print(f"No MC/DC cases for {fn.spelling}")
 
-if __name__ == '__main__':
-    main()
+if __name__=='__main__': main()
