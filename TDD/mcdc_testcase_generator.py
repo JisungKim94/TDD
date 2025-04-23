@@ -84,7 +84,7 @@ def parse_functions(src_dir, inc_dir):
 
 def gather_atoms_and_fields(cond_cursor, fields_map):
     """
-    Extract atomic conditions from the AST, mapping to struct parameters.
+    Extract atomic conditions from the AST, mapping to struct parameters and conditional expressions.
     fields_map: dict of {param_name: set(of field names)}
     Returns list of (base.field, field) tuples.
     """
@@ -98,6 +98,7 @@ def gather_atoms_and_fields(cond_cursor, fields_map):
         return None
 
     def visit(node):
+        # Handle member reference expressions
         if node.kind == CursorKind.MEMBER_REF_EXPR:
             field_name = node.spelling
             base = find_base(node)
@@ -105,8 +106,23 @@ def gather_atoms_and_fields(cond_cursor, fields_map):
                 key = f"{base}.{field_name}"
                 atoms.append((key, field_name))
                 logging.debug(f"Matched atom: {key}")
-        for ch in node.get_children():
-            visit(ch)
+        # Handle binary comparisons (e.g., <=, <, >, ==)
+        elif node.kind == CursorKind.BINARY_OPERATOR:
+            # Check children for member refs
+            children = list(node.get_children())
+            for ch in children:
+                if ch.kind == CursorKind.MEMBER_REF_EXPR:
+                    visit(ch)
+        # Handle ternary conditional operator
+        elif node.kind == CursorKind.CONDITIONAL_OPERATOR:
+            # children: condition, trueExpr, falseExpr
+            children = list(node.get_children())
+            if children:
+                # visit only the condition part
+                visit(children[0])
+        # Recurse into all children
+        for child in node.get_children():
+            visit(child)
     visit(cond_cursor)
     return atoms
 
