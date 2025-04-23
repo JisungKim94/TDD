@@ -157,13 +157,29 @@ def solve_mcdc(_, atoms):
 def write_test_file(fn, struct_name, cases, out_dir):
     path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
     with open(path, 'w') as f:
-        f.write('#include "gtest/gtest.h"\n')
-        f.write('#include "mycode.h"\n')
+        f.write('#include "gtest/gtest.h"
+')
+        f.write('#include "mycode.h"
+
+')
         for i, (label, vals) in enumerate(cases, 1):
-            f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) '+'{\n')
-            f.write(f'  {struct_name} in = '+'{ '+', '.join(f'.{k}={v}' for k,v in vals.items())+' };\n')
-            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&in)); // {label}\n')
-            f.write('}\n\n')
+            f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{
+')
+            f.write(f'  {struct_name} globalRoles = {{0}};
+')
+            for k, v in vals.items():
+                f.write(f'  globalRoles.{k} = {v};
+')
+            f.write(f'
+  // MC/DC unrelated but required input
+')
+            f.write(f'  tECUOrders u8_Orders = {{0}};
+')
+            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&globalRoles)); // {label}
+')
+            f.write('}
+
+')
     logging.info(f"Generated: {path}")
 
 def main():
