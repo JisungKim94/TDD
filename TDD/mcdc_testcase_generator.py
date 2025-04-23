@@ -88,31 +88,34 @@ def gather_atoms_and_fields(cond_cursor, struct_fields):
     atoms = []
     def visit(node):
         logging.debug(f"Visiting node: kind={node.kind}, spelling='{node.spelling}', displayname='{node.displayname}'")
+
         if node.kind == CursorKind.MEMBER_REF_EXPR:
-            field_name = node.spelling
-            if field_name in struct_fields:
-                atoms.append((field_name, f"{field_name} (from AST)"))
-                logging.debug(f"Matched atom via MEMBER_REF_EXPR: {field_name}")
+            parent = node.semantic_parent
+            if parent and parent.kind == CursorKind.UNEXPOSED_EXPR:
+                grandparent = parent.semantic_parent
+                if grandparent and grandparent.kind == CursorKind.DECL_REF_EXPR:
+                    base_var = grandparent.spelling
+                    field_name = node.spelling
+                    combined_name = f"{base_var}.{field_name}"
+                    atoms.append((combined_name, f"{combined_name} (from deref)"))
+                    logging.debug(f"Matched dereferenced member: {combined_name}")
+
         elif node.kind == CursorKind.BINARY_OPERATOR:
             children = list(node.get_children())
             if len(children) == 2:
                 lhs, rhs = children
-                lhs_text = lhs.spelling or lhs.displayname
-                for field in struct_fields:
-                    if field in lhs_text:
-                        atoms.append((field, f"{lhs_text} op {rhs.spelling or rhs.displayname}"))
-                        logging.debug(f"Matched atom via BINARY_OPERATOR: {lhs_text}")
                 for side in [lhs, rhs]:
-                    if side.kind == CursorKind.DECL_REF_EXPR:
-                        var_name = side.spelling
-                        if var_name:
-                            atoms.append((var_name, f"{var_name} (from comparison)"))
-                            logging.debug(f"Matched atom via BINARY_OPERATOR comparison: {var_name}")
-        elif node.kind == CursorKind.DECL_REF_EXPR:
-            var_name = node.spelling
-            if var_name:
-                atoms.append((var_name, f"{var_name} (DECL_REF_EXPR)"))
-                logging.debug(f"Matched atom via DECL_REF_EXPR: {var_name}")
+                    if side.kind == CursorKind.MEMBER_REF_EXPR:
+                        parent = side.semantic_parent
+                        if parent and parent.kind == CursorKind.UNEXPOSED_EXPR:
+                            grandparent = parent.semantic_parent
+                            if grandparent and grandparent.kind == CursorKind.DECL_REF_EXPR:
+                                base_var = grandparent.spelling
+                                field_name = side.spelling
+                                combined_name = f"{base_var}.{field_name}"
+                                atoms.append((combined_name, f"{combined_name} (from comparison)"))
+                                logging.debug(f"Matched member in comparison: {combined_name}")
+
         for child in node.get_children():
             visit(child)
     visit(cond_cursor)
@@ -160,26 +163,18 @@ def solve_mcdc(_, atoms):
 def write_test_file(fn, struct_name, cases, out_dir):
     path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
     with open(path, 'w') as f:
-        f.write('#include "gtest/gtest.h"
-')
-        f.write('#include "mycode.h"
-')
+        f.write('#include "gtest/gtest.h"\n')
+        f.write('#include "mycode.h"\n')
         for i, (label, vals) in enumerate(cases, 1):
-            f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{
-')
-            f.write(f'  {struct_name} globalRoles = {{0}};
-')
+            input_var_name = "st_" + fn.spelling if struct_name.lower().startswith("fail") else "globalRoles"
+            f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{\n')
+            f.write(f'  {struct_name} {input_var_name} = {{0}};\n')
             for k, v in vals.items():
-                f.write(f'  globalRoles.{k} = {v};
-')
-            f.write('  // MC/DC unrelated but required input
-')
-            f.write('  tECUOrders u8_Orders = {0};
-')
-            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&globalRoles)); // {label}
-')
-            f.write('}
-')
+                f.write(f'  {input_var_name}.{k.split(".")[-1]} = {v};\n')
+            f.write('  // MC/DC unrelated but required input\n')
+            f.write('  tECUOrders u8_Orders = {0};\n')
+            f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&{input_var_name}, &u8_Orders)); // {label}\n')
+            f.write('}\n')
     logging.info(f"Generated: {path}")
 
 def main():
