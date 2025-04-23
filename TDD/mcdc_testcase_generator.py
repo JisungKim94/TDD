@@ -70,12 +70,13 @@ def parse_functions(src_dir, include_dir):
     return funcs
 
 def write_skeleton(fn, fields_map, out_dir):
+    logging.debug(f"Generating skeleton test for function: {fn.spelling}")
     path = os.path.join(out_dir, f"testMCDC_{fn.spelling}_skeleton.cpp")
     with open(path,'w') as f:
         f.write('#include "gtest/gtest.h"\n')
         f.write('#include "mycode.h"\n\n')
         f.write(f'// Skeleton MC/DC GoogleTest for {fn.spelling}\n')
-        f.write(f'TEST({fn.spelling}_MC_DC, Skeleton) {{\n')
+        f.write(f'TEST(MCDC_{fn.spelling}, Skeleton) {{\n')
         # Declare inputs
         for p in fn.get_arguments():
             tp = p.type.spelling.replace('*','').strip()
@@ -89,6 +90,7 @@ def write_skeleton(fn, fields_map, out_dir):
     logging.info(f"Generated skeleton: {path}")
 
 def write_test_file(fn, cases, fields_map, out_dir):
+    logging.debug(f"Generating MC/DC tests for function: {fn.spelling} with {len(cases)} cases")
     path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
     with open(path,'w') as f:
         f.write('#include "gtest/gtest.h"\n')
@@ -111,6 +113,7 @@ def write_test_file(fn, cases, fields_map, out_dir):
     logging.info(f"Generated: {path}")
 
 def solve_mcdc(atoms):
+    logging.debug(f"Solving MC/DC for atoms: {[a for a,_ in atoms]}")
     tests=[]
     vars={k:z3.Int(k.replace('.','_')) for k,_ in atoms}
     for k,_ in atoms:
@@ -186,7 +189,9 @@ def main():
     os.makedirs(tst, exist_ok=True)
     load_libclang()
     types = parse_headers(inc)
+    logging.debug(f"Parsed headers: {list(types.keys())}")
     funcs = parse_functions(src, inc)
+    logging.debug(f"Parsed functions: {[f.spelling for f in funcs]}")
     logging.debug(f"Parsed {len(funcs)} functions.")
 
     for fn in funcs:
@@ -215,4 +220,3 @@ def main():
 
 if __name__ == '__main__':
     main()
- main()
