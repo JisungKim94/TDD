@@ -137,7 +137,7 @@ def solve_mcdc(_, atoms):
     return tests
 
 def write_test_file(fn, cases, out_dir):
-    args = list(fn.get_arguments())
+    args = list(list(fn.get_arguments()))
     # Parameter names and types from signature
     name0 = args[0].spelling
     type0 = args[0].type.spelling.replace('*','').strip()
@@ -189,7 +189,7 @@ def main():
 
     for fn in funcs:
         # Determine struct fields from first parameter
-        arg0 = list(fn.get_arguments())[0]
+        arg0 = list(list(fn.get_arguments()))[0]
         type0 = arg0.type.spelling.replace('*','').strip()
         cursor = types.get(type0)
         if not cursor:
@@ -199,7 +199,7 @@ def main():
         atoms = gather_conditions(fn, fields)
         cases = solve_mcdc(fields, atoms)
         # Filter to valid struct members
-        base0 = list(fn.get_arguments())[0].spelling
+        base0 = list(list(fn.get_arguments()))[0].spelling
         case_filtered = []
         for atom, vec in cases:
             b, fld = atom.split('.',1)
