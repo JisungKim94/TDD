@@ -85,6 +85,7 @@ def parse_functions(src_path, include_path):
 def gather_atoms_and_fields(cond_cursor, struct_fields):
     atoms = []
     def visit(node):
+        print(f"[DEBUG] Visiting node: kind={node.kind}, spelling='{node.spelling}', displayname='{node.displayname}'")
         if node.kind == CursorKind.BINARY_OPERATOR:
             text = node.spelling or node.displayname
             if text:
@@ -102,9 +103,13 @@ def gather_conditions(fn_cursor, struct_fields):
     atoms = []
     def recurse(node):
         if node.kind in (CursorKind.IF_STMT, CursorKind.WHILE_STMT, CursorKind.CONDITIONAL_OPERATOR):
+            print(f"[DEBUG] Found conditional statement: {node.kind} in function {fn_cursor.spelling}")
             cond = next(node.get_children(), None)
             if cond:
+                print(f"[DEBUG] Condition expression: {cond.spelling} / {cond.displayname}")
                 atoms.extend(gather_atoms_and_fields(cond, struct_fields))
+            else:
+                print(f"[WARN] Condition node has no children in {fn_cursor.spelling}")
         for ch in node.get_children():
             recurse(ch)
     recurse(fn_cursor)
