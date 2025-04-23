@@ -1,3 +1,5 @@
+# 최종 통합 버전: 함수명 유연하게 추출 + if 조건 자동 인식 + MC/DC 케이스 생성
+
 import os
 import re
 import sys
@@ -63,14 +65,14 @@ def main():
 
     code = read_file(c_path)
 
-    # 1. 함수 이름 추출
-    m_func = re.search(r'\bint\s+(\w+)\s*\(', code)
+    # 함수 이름 추출 (넓게 허용)
+    m_func = re.search(r'\b(?:static\s+)?(?:inline\s+)?(?:\w+\s+)+(\w+)\s*\(', code)
     if not m_func:
         print("Error: No function found.")
         sys.exit(1)
     func_name = m_func.group(1)
 
-    # 2. 첫 번째 if 조건 추출
+    # 첫 번째 if 문 조건 추출
     m_if = re.search(r'if\s*\((.*?)\)', code, re.DOTALL)
     if not m_if:
         print("Error: No if-statement found for MC/DC generation.")
