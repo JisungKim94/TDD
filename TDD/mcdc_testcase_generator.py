@@ -88,7 +88,6 @@ def gather_atoms_and_fields(cond_cursor, struct_fields):
     atoms = []
     def visit(node):
         logging.debug(f"Visiting node: kind={node.kind}, spelling='{node.spelling}', displayname='{node.displayname}'")
-
         if node.kind == CursorKind.MEMBER_REF_EXPR:
             parent = node.semantic_parent
             if parent and parent.kind == CursorKind.UNEXPOSED_EXPR:
@@ -99,12 +98,11 @@ def gather_atoms_and_fields(cond_cursor, struct_fields):
                     combined_name = f"{base_var}.{field_name}"
                     atoms.append((combined_name, f"{combined_name} (from deref)"))
                     logging.debug(f"Matched dereferenced member: {combined_name}")
-
         elif node.kind == CursorKind.BINARY_OPERATOR:
             children = list(node.get_children())
             if len(children) == 2:
                 lhs, rhs = children
-                for side in [lhs, rhs]:
+                for side in (lhs, rhs):
                     if side.kind == CursorKind.MEMBER_REF_EXPR:
                         parent = side.semantic_parent
                         if parent and parent.kind == CursorKind.UNEXPOSED_EXPR:
@@ -115,7 +113,6 @@ def gather_atoms_and_fields(cond_cursor, struct_fields):
                                 combined_name = f"{base_var}.{field_name}"
                                 atoms.append((combined_name, f"{combined_name} (from comparison)"))
                                 logging.debug(f"Matched member in comparison: {combined_name}")
-
         for child in node.get_children():
             visit(child)
     visit(cond_cursor)
@@ -143,62 +140,53 @@ def solve_mcdc(_, atoms):
     logging.debug(f"Solving MC/DC with fields: {fields} and atoms: {atoms}")
     tests = []
     z3vars = {name: z3.Int(name) for name in fields}
-    for idx, (field, expr) in enumerate(atoms):
-        for val in [0, 1]:
+    for (_, _), (field, expr) in enumerate(atoms):  # fix enumerate unpack
+        for val in (0, 1):
             s = z3.Solver()
             s.add(z3vars[field] == val)
             for other, _ in atoms:
                 if other != field:
                     s.add(z3vars[other] == 1)
             if s.check() == z3.sat:
-                model = s.model()
-                test_vector = {k: model[z3vars[k]].as_long() for k in z3vars}
-                tests.append((f"{field}={val}", test_vector))
-                logging.debug(f"Found SAT for {field}={val}: {test_vector}")
+                m = s.model()
+                test_vec = {k: m[z3vars[k]].as_long() for k in z3vars}
+                tests.append((f"{field}={val}", test_vec))
+                logging.debug(f"Found SAT for {field}={val}: {test_vec}")
                 break
             else:
                 logging.warning(f"UNSAT for {field}={val} with others fixed to 1")
     return tests
 
 def write_test_file(fn, cases, out_dir):
-    # Derive parameter names and types dynamically from function signature
     args = list(fn.get_arguments())
     if not args:
         logging.error(f"No parameters for function {fn.spelling}, cannot generate test file.")
         return
-    # First argument (e.g., GlobalRoles *globalRoles)
-    arg0 = args[0].spelling or 'input0'
+    # dynamic parameter names and types
+    name0 = args[0].spelling or 'input0'
     type0 = args[0].type.spelling.replace('*', '').strip()
-    # Second argument if exists (e.g., tECUOrders *u8_Orders)
     if len(args) > 1:
-        arg1 = args[1].spelling or 'input1'
+        name1 = args[1].spelling or 'input1'
         type1 = args[1].type.spelling.replace('*', '').strip()
     else:
-        arg1 = None
-        type1 = None
-
+        name1, type1 = None, None
     path = os.path.join(out_dir, f"testMCDC_{fn.spelling}.cpp")
     with open(path, 'w') as f:
-        # Standard includes
         f.write('#include "gtest/gtest.h"\n')
         f.write('#include "mycode.h"\n')
-        # Generate a test case per MC/DC vector
         for i, (label, vals) in enumerate(cases, 1):
             f.write(f'TEST({fn.spelling}_MC_DC, Case{i}) {{\n')
-            # Initialize parameters to zero
-            f.write(f'  {type0} {arg0} = {{0}};\n')
-            if arg1 and type1:
-                f.write(f'  {type1} {arg1} = {{0}};\n')
-            # Assign MC/DC test values
+            f.write(f'  {type0} {name0} = {{0}};\n')
+            if name1:
+                f.write(f'  {type1} {name1} = {{0}};\n')
             for k, v in vals.items():
                 base, field = k.split('.', 1)
                 f.write(f'  {base}.{field} = {v};\n')
-            # Call function under test
-            if arg1 and type1:
-                f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&{arg0}, &{arg1})); // {label}\n')
+            if name1:
+                f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&{name0}, &{name1})); // {label}\n')
             else:
-                f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&{arg0})); // {label}\n')
-            f.write('}\n')
+                f.write(f'  EXPECT_NO_FATAL_FAILURE({fn.spelling}(&{name0})); // {label}\n')
+            f.write('}\n\n')
     logging.info(f"Generated: {path}")
 
 def main():
@@ -218,17 +206,17 @@ def main():
         if not args:
             logging.warning(f"Function {fn.spelling} has no arguments, skipping.")
             continue
-        struct_type = args[0].type.spelling.replace('*', '').strip()
-        struct_cursor = types.get(struct_type)
-        if not struct_cursor:
-            logging.warning(f"Struct {struct_type} not found for {fn.spelling}, skipping.")
+        type0 = args[0].type.spelling.replace('*', '').strip()
+        cursor = types.get(type0)
+        if not cursor:
+            logging.warning(f"Struct {type0} not found for {fn.spelling}, skipping.")
             continue
-        fields = {f.spelling for f in struct_cursor.get_children() if f.kind.name == 'FIELD_DECL'}
-        logging.debug(f"Struct {struct_type} fields: {fields}")
+        fields = {f.spelling for f in cursor.get_children() if f.kind.name == 'FIELD_DECL'}
+        logging.debug(f"Struct {type0} fields: {fields}")
         atoms = gather_conditions(fn, fields)
         cases = solve_mcdc(fields, atoms)
         if cases:
-            write_test_file(fn, struct_type, cases, tst)
+            write_test_file(fn, cases, tst)
         else:
             logging.warning(f"No MC/DC cases for {fn.spelling}")
 
